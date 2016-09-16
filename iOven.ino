@@ -81,6 +81,12 @@ Transition fromJustTimerSetToOff = {
   &switch2Pressed
 };
 
+Transition fromJustTimerSetToJustTimerRun = {
+  justTimerSetState,
+  justTimerRunState,
+  &switch1Pressed
+};
+
 Transition fromJustTimerRunToOff = {
   justTimerRunState,
   offState,
@@ -99,9 +105,10 @@ Transition fromAlarmToOff = {
   &from_alarm_to_off
 };
 
-#define TRANSITIONS_NUM 5
+#define TRANSITIONS_NUM 6
 Transition transitions[TRANSITIONS_NUM] = {
-  fromOffToJustTimerSet, fromJustTimerSetToOff, fromJustTimerRunToOff, fromJustTimerRunToAlarm, fromAlarmToOff
+  fromOffToJustTimerSet, fromJustTimerSetToOff, fromJustTimerSetToJustTimerRun, fromJustTimerRunToOff,
+  fromJustTimerRunToAlarm, fromAlarmToOff
 };
 
 StateMachine iOvenStateMachine(offState,transitions, TRANSITIONS_NUM);
@@ -208,7 +215,7 @@ void offStateEnter() {
   debug("offStateEnter");
   turnGPIOAFlagOff(DISPLAY_MASK);
   longBeep();
-  displayContent[2] = " timer";
+  sprintf(displayContent[2], "  timer");
 }
 
 void offStateExit() {
@@ -225,7 +232,7 @@ void justTimerSetEnter() {
   justTimerSetTimeout = timer.setTimeout(30000, &invokeCancelJustTimerSet);
   justTimerSeconds = 60; // Init timer to default 60 seconds
   isMinutes = false;
-  displayContent[2] = " start    cancel";
+  sprintf(displayContent[2], "   start    cancel");
 }
 
 void justTimerSetExit() {
