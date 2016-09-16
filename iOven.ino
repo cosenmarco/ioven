@@ -6,6 +6,7 @@
 #include <math.h>
 #include "StateMachine.h"
 #include "SimpleTimer.h"
+#include <avr/pgmspace.h>
 
 // MCP23017
 #define MCP23017_ADDRESS 0x20
@@ -21,6 +22,17 @@
 
 #define ENCODER_CLK_PIN 3
 #define ENCODER_DT_PIN 4
+
+// String pool in program memory
+const char empty_button_label[] PROGMEM = "          ";
+const char timer_button_label[] PROGMEM = "   timer  ";
+const char start_button_label[] PROGMEM = "   start  ";
+const char cancel_button_label[] PROGMEM = " annulla  ";
+
+const char date_row_fmt[] PROGMEM = "%s %02d/%02d/%02d %02d:%02d:%02d";
+const char temperature_row_fmt[] PROGMEM = "%3d\1C";
+const char timer_row_fmt[] PROGMEM = "      %1d:%02d:%02d";
+const char empty_row_fmt[] PROGMEM = "                    ";
 
 LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
 RTC_DS1307 rtc;
@@ -41,7 +53,6 @@ byte deg[8] = {
   B00000,
   B00000,
 };
-char displayContent[4][21];
 
 SimpleTimer timer;
 int justTimerSetTimeout = -1; // This timer is used to cancel automatically if we stay too long in justTimerSetState
@@ -55,13 +66,21 @@ bool isMinutes;
 // Rotary encoder data and handler
 volatile int encoderPositionSinceLastLoop = 0;
 void doEncoderClkTick() {
-  bool dt = digitalRead(ENCODER_DT_PIN);
-  if (dt) {
+  bool clk = digitalRead(ENCODER_CLK_PIN);
+  bool up;
+  if (clk) {
+    up = digitalRead(ENCODER_DT_PIN);
+  } else {
+    up = !digitalRead(ENCODER_DT_PIN);
+  }
+  if (up) {
     encoderPositionSinceLastLoop --;
   } else {
     encoderPositionSinceLastLoop ++;
   }
 }
+
+bool previousLoopButtonStatus[3] = { false, false, false };
 
 // ################# The State Machine #################
 State offState(&offStateEnter, NULL, &offStateExit);
@@ -150,8 +169,8 @@ void setup () {
   Wire.endTransmission();
 
   // Setup rotary encoder
-  pinMode(ENCODER_CLK_PIN,INPUT);
-  pinMode(ENCODER_DT_PIN,INPUT);
+  pinMode(ENCODER_CLK_PIN, INPUT);
+  pinMode(ENCODER_DT_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, FALLING);
 
 
@@ -169,15 +188,17 @@ void loop () {
 
   iOvenStateMachine.loop();
 
-  printDisplay();
+  //printDisplay();
   encoderPositionSinceLastLoop = 0;
+  timer.run();
+  setPreviousLoopButtonsStatus();
 }
 
 void readInputs() {
   now = rtc.now();
   currentTemperature = thermocouple.readCelsius();
 
-  // Read the status of switches & knob
+  // Read the status of switches
   Wire.beginTransmission(MCP23017_ADDRESS);
   Wire.write(GPIOB);
   Wire.requestFrom(MCP23017_ADDRESS,1);
@@ -185,41 +206,35 @@ void readInputs() {
   Wire.endTransmission();
 }
 
+void setPreviousLoopButtonsStatus() {
+  previousLoopButtonStatus[0] = (mcp23017_GPIOB & SWITCH1_MASK) != 0;
+  previousLoopButtonStatus[1] = (mcp23017_GPIOB & SWITCH2_MASK) != 0;
+  previousLoopButtonStatus[2] = (mcp23017_GPIOB & SWITCH3_MASK) != 0;
+}
+
 void updateDisplayTemperature() {
   // Second line: temperature
-  sprintf(displayContent[1], "%3d\1C", round(currentTemperature));
+  display_printf_P(1, temperature_row_fmt, round(currentTemperature));
 }
 
 void updateDisplayClock() {
   // First line: clock
-  sprintf(displayContent[0], "%s %02d/%02d/%02d %02d:%02d:%02d", daysOfTheWeek[now.dayOfTheWeek()], now.day(),
+  display_printf_P(0, date_row_fmt, daysOfTheWeek[now.dayOfTheWeek()], now.day(),
     now.month(), now.year() % 100, now.hour(), now.minute(), now.second());
-}
-
-void printDisplay() {
-  lcd.setCursor(0, 0);
-  lcd.print(displayContent[0]);
-
-  lcd.setCursor(0, 1);
-  lcd.print(displayContent[1]);
-
-  lcd.setCursor(0, 2);
-  lcd.print(displayContent[2]);
-
-  lcd.setCursor(0, 3);
-  lcd.print(displayContent[3]);
 }
 
 // ###############  State Machine functions ###############
 void offStateEnter() {
-  debug("offStateEnter");
+  debug(F("offStateEnter"));
   turnGPIOAFlagOff(DISPLAY_MASK);
   longBeep();
-  sprintf(displayContent[2], "  timer");
+  display_printf_P(2, empty_row_fmt);
+  setButtonLabel(0, timer_button_label);
+  setButtonLabel(1, empty_button_label);
 }
 
 void offStateExit() {
-  debug("offStateExit");
+  debug(F("offStateExit"));
   turnGPIOAFlagOn(DISPLAY_MASK);
   beep();
 }
@@ -228,15 +243,16 @@ void offStateLoop() {
 }
 
 void justTimerSetEnter() {
-  debug("justTimerSetEnter");
-  justTimerSetTimeout = timer.setTimeout(30000, &invokeCancelJustTimerSet);
+  debug(F("justTimerSetEnter"));
+  justTimerSetTimeout = timer.setTimeout(10000, &invokeCancelJustTimerSet);
   justTimerSeconds = 60; // Init timer to default 60 seconds
   isMinutes = false;
-  sprintf(displayContent[2], "   start    cancel");
+  setButtonLabel(0, start_button_label);
+  setButtonLabel(1, cancel_button_label);
 }
 
 void justTimerSetExit() {
-  debug("justTimerSetExit");
+  debug(F("justTimerSetExit"));
   if(justTimerSetTimeout >= 0){
     timer.deleteTimer(justTimerSetTimeout);
     justTimerSetTimeout = -1;
@@ -256,23 +272,25 @@ void justTimerSetRunLoop() {
     increment = encoderPositionSinceLastLoop * 5; // Every tick is 5 seconds
   }
 
-  int sum = increment + justTimerSeconds;
+  if(increment != 0) {
+    int sum = increment + justTimerSeconds;
 
-  if(sum >= 5) {
-    justTimerSeconds = sum;
-  } else {
-    justTimerSeconds = 5;
-  }
+    if(sum >= 5) {
+      justTimerSeconds = sum;
+    } else {
+      justTimerSeconds = 5;
+    }
 
-  if(increment != 0 && justTimerSetTimeout >= 0) {
-    timer.restartTimer(justTimerSetTimeout);
+    if(justTimerSetTimeout >= 0) {
+      timer.restartTimer(justTimerSetTimeout);
+    }
   }
 
   if(!isMinutes && switch3Pressed()) {
     isMinutes = true;
   }
 
-  sprintf(displayContent[2], "      %1d:%02d:%02d", floor(justTimerSeconds / 3600), floor((justTimerSeconds / 60) % 60),
+  display_printf_P(2, timer_row_fmt, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60,
     justTimerSeconds % 60 );
 }
 
@@ -283,12 +301,13 @@ void decrementTimer() {
 }
 
 void justTimerRunEnter() {
-  debug("justTimerRunEnter");
+  debug(F("justTimerRunEnter"));
   justTimerDecrementerInterval = timer.setInterval(1000, &decrementTimer);
+  setButtonLabel(0, empty_button_label);
 }
 
 void justTimerRunExit() {
-  debug("justTimerRunExit");
+  debug(F("justTimerRunExit"));
   timer.deleteTimer(justTimerDecrementerInterval);
 }
 
@@ -302,13 +321,14 @@ void toggleAlarm() {
 }
 
 void alarmEnter() {
-  debug("alarmEnter");
+  debug(F("alarmEnter"));
   alarmInterval = timer.setInterval(300, &toggleAlarm);
   alarmTimeoutTimerId = timer.setTimeout(15000, &alarmTimeout);
+  setButtonLabel(0, cancel_button_label);
 }
 
 void alarmExit() {
-  debug("alarmExit");
+  debug(F("alarmExit"));
   timer.deleteTimer(alarmInterval);
   if(alarmTimeoutTimerId >= 0) {
     timer.deleteTimer(alarmTimeoutTimerId);
@@ -328,7 +348,7 @@ bool from_alarm_to_off() {
 
 // ############### Helper functions ###############
 void turnGPIOAFlagOff(byte mask) {
-  mcp23017_GPIOA &= !mask;
+  mcp23017_GPIOA &= ~mask;
   sendGPIOA();
 }
 
@@ -338,15 +358,15 @@ void turnGPIOAFlagOn(byte mask) {
 }
 
 bool switch1Pressed() {
-  return (mcp23017_GPIOB & SWITCH1_MASK) != 0;
+  return (mcp23017_GPIOB & SWITCH1_MASK) && !previousLoopButtonStatus[0];
 }
 
 bool switch2Pressed() {
-  return (mcp23017_GPIOB & SWITCH2_MASK) != 0;
+  return (mcp23017_GPIOB & SWITCH2_MASK) && !previousLoopButtonStatus[1];
 }
 
 bool switch3Pressed() {
-  return (mcp23017_GPIOB & SWITCH3_MASK) != 0;
+  return (mcp23017_GPIOB & SWITCH3_MASK) && !previousLoopButtonStatus[2];
 }
 
 void sendGPIOA() {
@@ -356,7 +376,7 @@ void sendGPIOA() {
   Wire.endTransmission();
 }
 
-void debug(char * string) {
+void debug(const __FlashStringHelper * string) {
   Serial.println(string);
 }
 
@@ -372,4 +392,30 @@ void beep() {
 void longBeep() {
   turnGPIOAFlagOn(BUZZER_MASK);
   timer.setTimeout(300, &turnBuzzerOff);
+}
+
+// Sets the string on the last row of the display reading data from program memory
+void setButtonLabel(bool button, const char * label) {
+  int position = button ? 10 : 0;
+  display_print_P(3, position, label);
+}
+
+// Row is the display row in the range 0 to 3
+void display_printf_P(byte row, const char * fmt, ...) {
+  char buffer[21];
+  va_list ap;
+
+  va_start(ap, fmt);
+  vsprintf_P(buffer, fmt, ap);
+  va_end(ap);
+
+  lcd.setCursor(0, row);
+  lcd.print(buffer);
+}
+
+void display_print_P(byte row, byte pos, const char * content) {
+  char buffer[21];
+  strcpy_P(buffer, content);
+  lcd.setCursor(pos, row);
+  lcd.print(buffer);
 }
