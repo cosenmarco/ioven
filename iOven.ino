@@ -50,7 +50,11 @@ const char cancel_button_label[] PROGMEM = " annulla  ";
 
 const char date_row_fmt[] PROGMEM = "%s %02d/%02d/%02d %02d:%02d:%02d";
 const char temperature_row_fmt[] PROGMEM = "%3d\1C";
-const char timer_row_fmt[] PROGMEM = "      %1d:%02d:%02d";
+const char timer_row_fmt[] PROGMEM = "      %d:%02d:%02d";
+const char timer_row_fmt_no_min[] PROGMEM = "      %d:  :%02d";
+const char timer_row_fmt_no_sec[] PROGMEM = "      %d:%02d:  ";
+
+const char time_over_message[] PROGMEM = "   TEMPO  SCADUTO   ";
 const char empty_row_fmt[] PROGMEM = "                    ";
 
 LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
@@ -78,9 +82,11 @@ int justTimerSetTimeout = -1; // This timer is used to cancel automatically if w
 int justTimerDecrementerInterval = -1; // This interval decrements the timer every second
 int alarmInterval = -1; // This is used to toggle between beep on and beep off state to make an alarm
 int alarmTimeoutTimerId = -1;
+int blinkerInterval = -1;
 
 int justTimerSeconds;
 bool isMinutes;
+bool blinkStatus;
 
 // Rotary encoder data and handler
 volatile int encoderPositionSinceLastLoop = 0;
@@ -103,8 +109,8 @@ bool previousLoopButtonStatus[3] = { false, false, false };
 
 // ################# The State Machine #################
 State offState(&offStateEnter, NULL, &offStateExit);
-State justTimerSetState(&justTimerSetEnter, &justTimerSetRunLoop, &justTimerSetExit);
-State justTimerRunState(&justTimerRunEnter, &justTimerSetRunLoop, &justTimerRunExit); // Note: same loop function of justTimerSetState
+State justTimerSetState(&justTimerSetEnter, &justTimerSetLoop, &justTimerSetExit);
+State justTimerRunState(&justTimerRunEnter, &justTimerRunLoop, &justTimerRunExit); // Note: same loop function of justTimerSetState
 State alarmState(&alarmEnter, NULL, &alarmExit);
 
 Transition fromOffToJustTimerSet = {
@@ -125,6 +131,12 @@ Transition fromJustTimerSetToJustTimerRun = {
   &switch1Pressed
 };
 
+Transition fromJustTimerRunToJustTimerSet = {
+  justTimerRunState,
+  justTimerSetState,
+  &switch1Pressed
+};
+
 Transition fromJustTimerRunToOff = {
   justTimerRunState,
   offState,
@@ -134,7 +146,7 @@ Transition fromJustTimerRunToOff = {
 Transition fromJustTimerRunToAlarm = {
   justTimerRunState,
   alarmState,
-  &from_justttimer_run_to_alarm
+  &from_just_timer_run_to_alarm
 };
 
 Transition fromAlarmToOff = {
@@ -143,13 +155,13 @@ Transition fromAlarmToOff = {
   &from_alarm_to_off
 };
 
-#define TRANSITIONS_NUM 6
+#define TRANSITIONS_NUM 7
 Transition transitions[TRANSITIONS_NUM] = {
-  fromOffToJustTimerSet, fromJustTimerSetToOff, fromJustTimerSetToJustTimerRun, fromJustTimerRunToOff,
-  fromJustTimerRunToAlarm, fromAlarmToOff
+  fromOffToJustTimerSet, fromJustTimerSetToOff, fromJustTimerRunToJustTimerSet, fromJustTimerSetToJustTimerRun,
+  fromJustTimerRunToOff, fromJustTimerRunToAlarm, fromAlarmToOff
 };
 
-StateMachine iOvenStateMachine(offState,transitions, TRANSITIONS_NUM);
+StateMachine iOvenStateMachine(offState, transitions, TRANSITIONS_NUM);
 
 // Setup function. Executed once at startup
 void setup () {
@@ -199,6 +211,8 @@ void setup () {
   offStateEnter(); // We start from the state OFF
 }
 
+
+// ############## LOOP and related functions ################
 void loop () {
   readInputs();
 
@@ -206,10 +220,9 @@ void loop () {
   updateDisplayTemperature();
 
   iOvenStateMachine.loop();
-
-  //printDisplay();
-  encoderPositionSinceLastLoop = 0;
   timer.run();
+
+  encoderPositionSinceLastLoop = 0;
   setPreviousLoopButtonsStatus();
 }
 
@@ -225,21 +238,19 @@ void readInputs() {
   Wire.endTransmission();
 }
 
+void updateDisplayClock() {
+  display_printf_P(0, date_row_fmt, daysOfTheWeek[now.dayOfTheWeek()], now.day(),
+    now.month(), now.year() % 100, now.hour(), now.minute(), now.second());
+}
+
+void updateDisplayTemperature() {
+  display_printf_P(1, temperature_row_fmt, round(currentTemperature));
+}
+
 void setPreviousLoopButtonsStatus() {
   previousLoopButtonStatus[0] = (mcp23017_GPIOB & SWITCH1_MASK) != 0;
   previousLoopButtonStatus[1] = (mcp23017_GPIOB & SWITCH2_MASK) != 0;
   previousLoopButtonStatus[2] = (mcp23017_GPIOB & SWITCH3_MASK) != 0;
-}
-
-void updateDisplayTemperature() {
-  // Second line: temperature
-  display_printf_P(1, temperature_row_fmt, round(currentTemperature));
-}
-
-void updateDisplayClock() {
-  // First line: clock
-  display_printf_P(0, date_row_fmt, daysOfTheWeek[now.dayOfTheWeek()], now.day(),
-    now.month(), now.year() % 100, now.hour(), now.minute(), now.second());
 }
 
 // ###############  State Machine functions ###############
@@ -250,6 +261,11 @@ void offStateEnter() {
   display_printf_P(2, empty_row_fmt);
   setButtonLabel(0, timer_button_label);
   setButtonLabel(1, empty_button_label);
+
+  // Init timer to default 60 seconds.
+  // Init happens here and not upon justTimerSetEnter() because we don't want to change the timer when
+  // switching back and forth from justTimerSet to justTimerRun
+  justTimerSeconds = 60;
 }
 
 void offStateExit() {
@@ -258,24 +274,25 @@ void offStateExit() {
   beep();
 }
 
-void offStateLoop() {
-}
-
 void justTimerSetEnter() {
   debug(F("justTimerSetEnter"));
-  justTimerSetTimeout = timer.setTimeout(10000, &invokeCancelJustTimerSet);
-  justTimerSeconds = 60; // Init timer to default 60 seconds
-  isMinutes = false;
+  justTimerSetTimeout = timer.setTimeout(20000, &invokeCancelJustTimerSet);
+  blinkerInterval = timer.setInterval(500, &blinkCallback);
+  isMinutes = true;
+  blinkStatus = true;
   setButtonLabel(0, start_button_label);
   setButtonLabel(1, cancel_button_label);
 }
 
 void justTimerSetExit() {
   debug(F("justTimerSetExit"));
-  if(justTimerSetTimeout >= 0){
+  if(justTimerSetTimeout >= 0) {
     timer.deleteTimer(justTimerSetTimeout);
     justTimerSetTimeout = -1;
   }
+  timer.deleteTimer(blinkerInterval);
+  blinkerInterval = -1;
+  blinkStatus = true;
 }
 
 void invokeCancelJustTimerSet() {
@@ -283,21 +300,19 @@ void invokeCancelJustTimerSet() {
   justTimerSetTimeout = -1;
 }
 
-void justTimerSetRunLoop() {
-  int increment;
-  if(isMinutes) {
-    increment = encoderPositionSinceLastLoop * 60; // Every tick is 1 minute
-  } else {
-    increment = encoderPositionSinceLastLoop * 5; // Every tick is 5 seconds
-  }
+void justTimerSetLoop() {
+  if(encoderPositionSinceLastLoop != 0) {
+    int sum;
+    if(isMinutes) {
+      sum = encoderPositionSinceLastLoop * 60 + justTimerSeconds; // Every tick is 1 minute
+    } else {
+      sum = encoderPositionSinceLastLoop      + justTimerSeconds; // Every tick is 5 seconds
+    }
 
-  if(increment != 0) {
-    int sum = increment + justTimerSeconds;
-
-    if(sum >= 5) {
+    if(sum >= 0) {
       justTimerSeconds = sum;
     } else {
-      justTimerSeconds = 5;
+      justTimerSeconds = 0;
     }
 
     if(justTimerSetTimeout >= 0) {
@@ -305,12 +320,18 @@ void justTimerSetRunLoop() {
     }
   }
 
-  if(!isMinutes && switch3Pressed()) {
-    isMinutes = true;
-  }
+  isMinutes ^= switch3Pressed();
 
-  display_printf_P(2, timer_row_fmt, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60,
-    justTimerSeconds % 60 );
+  if(blinkStatus) {
+    display_printf_P(2, timer_row_fmt, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60,
+      justTimerSeconds % 60 );
+  } else {
+    if(isMinutes) {
+      display_printf_P(2, timer_row_fmt_no_min, justTimerSeconds / 3600, justTimerSeconds % 60 );
+    } else {
+      display_printf_P(2, timer_row_fmt_no_sec, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60 );
+    }
+  }
 }
 
 void decrementTimer() {
@@ -322,16 +343,22 @@ void decrementTimer() {
 void justTimerRunEnter() {
   debug(F("justTimerRunEnter"));
   justTimerDecrementerInterval = timer.setInterval(1000, &decrementTimer);
-  setButtonLabel(0, empty_button_label);
+  setButtonLabel(0, timer_button_label);
 }
 
 void justTimerRunExit() {
   debug(F("justTimerRunExit"));
   timer.deleteTimer(justTimerDecrementerInterval);
+  justTimerDecrementerInterval = -1;
 }
 
-bool from_justttimer_run_to_alarm() {
-  return justTimerSeconds == 0;
+void justTimerRunLoop() {
+  display_printf_P(2, timer_row_fmt, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60,
+    justTimerSeconds % 60 );
+}
+
+bool from_just_timer_run_to_alarm() {
+  return justTimerSeconds <= 0;
 }
 
 void toggleAlarm() {
@@ -344,11 +371,13 @@ void alarmEnter() {
   alarmInterval = timer.setInterval(300, &toggleAlarm);
   alarmTimeoutTimerId = timer.setTimeout(15000, &alarmTimeout);
   setButtonLabel(0, cancel_button_label);
+  display_print_P(2, 0, time_over_message);
 }
 
 void alarmExit() {
   debug(F("alarmExit"));
   timer.deleteTimer(alarmInterval);
+  alarmInterval = -1;
   if(alarmTimeoutTimerId >= 0) {
     timer.deleteTimer(alarmTimeoutTimerId);
     alarmTimeoutTimerId = -1;
@@ -404,13 +433,19 @@ void turnBuzzerOff() {
 }
 
 void beep() {
+  debug(F("beep"));
   turnGPIOAFlagOn(BUZZER_MASK);
   timer.setTimeout(100, &turnBuzzerOff);
 }
 
 void longBeep() {
+  debug(F("longbeep"));
   turnGPIOAFlagOn(BUZZER_MASK);
   timer.setTimeout(300, &turnBuzzerOff);
+}
+
+void blinkCallback() {
+  blinkStatus ^= true;
 }
 
 // Sets the string on the last row of the display reading data from program memory
