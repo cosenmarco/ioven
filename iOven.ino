@@ -78,13 +78,13 @@ byte deg[8] = {
 };
 
 SimpleTimer timer;
-int justTimerSetTimeout = -1; // This timer is used to cancel automatically if we stay too long in justTimerSetState
-int justTimerDecrementerInterval = -1; // This interval decrements the timer every second
+int timerSetTimeout = -1; // This timer is used to cancel automatically if we stay too long in timerSetState
+int timerDecrementerInterval = -1; // This interval decrements the timer every second
 int alarmInterval = -1; // This is used to toggle between beep on and beep off state to make an alarm
 int alarmTimeoutTimerId = -1;
 int blinkerInterval = -1;
 
-int justTimerSeconds;
+int timerSeconds;
 bool isMinutes;
 bool blinkStatus;
 
@@ -109,44 +109,44 @@ bool previousLoopButtonStatus[3] = { false, false, false };
 
 // ################# The State Machine #################
 State offState(&offStateEnter, NULL, &offStateExit);
-State justTimerSetState(&justTimerSetEnter, &justTimerSetLoop, &justTimerSetExit);
-State justTimerRunState(&justTimerRunEnter, &justTimerRunLoop, &justTimerRunExit); // Note: same loop function of justTimerSetState
+State timerSetState(&timerSetEnter, &timerSetLoop, &timerSetExit);
+State timerRunState(&timerRunEnter, &timerRunLoop, &timerRunExit); // Note: same loop function of timerSetState
 State alarmState(&alarmEnter, NULL, &alarmExit);
 
-Transition fromOffToJustTimerSet = {
+Transition fromOffToTimerSet = {
   offState,
-  justTimerSetState,
+  timerSetState,
   &switch1Pressed
 };
 
-Transition fromJustTimerSetToOff = {
-  justTimerSetState,
-  offState,
-  &switch2Pressed
-};
-
-Transition fromJustTimerSetToJustTimerRun = {
-  justTimerSetState,
-  justTimerRunState,
-  &switch1Pressed
-};
-
-Transition fromJustTimerRunToJustTimerSet = {
-  justTimerRunState,
-  justTimerSetState,
-  &switch1Pressed
-};
-
-Transition fromJustTimerRunToOff = {
-  justTimerRunState,
+Transition fromTimerSetToOff = {
+  timerSetState,
   offState,
   &switch2Pressed
 };
 
-Transition fromJustTimerRunToAlarm = {
-  justTimerRunState,
+Transition fromTimerSetToTimerRun = {
+  timerSetState,
+  timerRunState,
+  &switch1Pressed
+};
+
+Transition fromTimerRunToTimerSet = {
+  timerRunState,
+  timerSetState,
+  &switch1Pressed
+};
+
+Transition fromTimerRunToOff = {
+  timerRunState,
+  offState,
+  &switch2Pressed
+};
+
+Transition fromTimerRunToAlarm = {
+  timerRunState,
   alarmState,
-  &from_just_timer_run_to_alarm
+  &from_timer_run_to_alarm
 };
 
 Transition fromAlarmToOff = {
@@ -157,8 +157,8 @@ Transition fromAlarmToOff = {
 
 #define TRANSITIONS_NUM 7
 Transition transitions[TRANSITIONS_NUM] = {
-  fromOffToJustTimerSet, fromJustTimerSetToOff, fromJustTimerRunToJustTimerSet, fromJustTimerSetToJustTimerRun,
-  fromJustTimerRunToOff, fromJustTimerRunToAlarm, fromAlarmToOff
+  fromOffToTimerSet, fromTimerSetToOff, fromTimerRunToTimerSet, fromTimerSetToTimerRun,
+  fromTimerRunToOff, fromTimerRunToAlarm, fromAlarmToOff
 };
 
 StateMachine iOvenStateMachine(offState, transitions, TRANSITIONS_NUM);
@@ -263,9 +263,9 @@ void offStateEnter() {
   setButtonLabel(1, empty_button_label);
 
   // Init timer to default 60 seconds.
-  // Init happens here and not upon justTimerSetEnter() because we don't want to change the timer when
-  // switching back and forth from justTimerSet to justTimerRun
-  justTimerSeconds = 60;
+  // Init happens here and not upon timerSetEnter() because we don't want to change the timer when
+  // switching back and forth from timerSet to timerRun
+  timerSeconds = 60;
 }
 
 void offStateExit() {
@@ -274,9 +274,9 @@ void offStateExit() {
   beep();
 }
 
-void justTimerSetEnter() {
-  debug(F("justTimerSetEnter"));
-  justTimerSetTimeout = timer.setTimeout(20000, &invokeCancelJustTimerSet);
+void timerSetEnter() {
+  debug(F("timerSetEnter"));
+  timerSetTimeout = timer.setTimeout(20000, &invokeCancelTimerSet);
   blinkerInterval = timer.setInterval(500, &blinkCallback);
   isMinutes = true;
   blinkStatus = true;
@@ -284,81 +284,81 @@ void justTimerSetEnter() {
   setButtonLabel(1, cancel_button_label);
 }
 
-void justTimerSetExit() {
-  debug(F("justTimerSetExit"));
-  if(justTimerSetTimeout >= 0) {
-    timer.deleteTimer(justTimerSetTimeout);
-    justTimerSetTimeout = -1;
+void timerSetExit() {
+  debug(F("timerSetExit"));
+  if(timerSetTimeout >= 0) {
+    timer.deleteTimer(timerSetTimeout);
+    timerSetTimeout = -1;
   }
   timer.deleteTimer(blinkerInterval);
   blinkerInterval = -1;
   blinkStatus = true;
 }
 
-void invokeCancelJustTimerSet() {
-  iOvenStateMachine.performTransitionNow(fromJustTimerSetToOff);
-  justTimerSetTimeout = -1;
+void invokeCancelTimerSet() {
+  iOvenStateMachine.performTransitionNow(fromTimerSetToOff);
+  timerSetTimeout = -1;
 }
 
-void justTimerSetLoop() {
+void timerSetLoop() {
   if(encoderPositionSinceLastLoop != 0) {
     int sum;
     if(isMinutes) {
-      sum = encoderPositionSinceLastLoop * 60 + justTimerSeconds; // Every tick is 1 minute
+      sum = encoderPositionSinceLastLoop * 60 + timerSeconds; // Every tick is 1 minute
     } else {
-      sum = encoderPositionSinceLastLoop      + justTimerSeconds; // Every tick is 5 seconds
+      sum = encoderPositionSinceLastLoop      + timerSeconds; // Every tick is 5 seconds
     }
 
     if(sum >= 0) {
-      justTimerSeconds = sum;
+      timerSeconds = sum;
     } else {
-      justTimerSeconds = 0;
+      timerSeconds = 0;
     }
 
-    if(justTimerSetTimeout >= 0) {
-      timer.restartTimer(justTimerSetTimeout);
+    if(timerSetTimeout >= 0) {
+      timer.restartTimer(timerSetTimeout);
     }
   }
 
   isMinutes ^= switch3Pressed();
 
   if(blinkStatus) {
-    display_printf_P(2, timer_row_fmt, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60,
-      justTimerSeconds % 60 );
+    display_printf_P(2, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
+      timerSeconds % 60 );
   } else {
     if(isMinutes) {
-      display_printf_P(2, timer_row_fmt_no_min, justTimerSeconds / 3600, justTimerSeconds % 60 );
+      display_printf_P(2, timer_row_fmt_no_min, timerSeconds / 3600, timerSeconds % 60 );
     } else {
-      display_printf_P(2, timer_row_fmt_no_sec, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60 );
+      display_printf_P(2, timer_row_fmt_no_sec, timerSeconds / 3600, (timerSeconds / 60) % 60 );
     }
   }
 }
 
 void decrementTimer() {
-  if (justTimerSeconds > 0) {
-    justTimerSeconds--;
+  if (timerSeconds > 0) {
+    timerSeconds--;
   }
 }
 
-void justTimerRunEnter() {
-  debug(F("justTimerRunEnter"));
-  justTimerDecrementerInterval = timer.setInterval(1000, &decrementTimer);
+void timerRunEnter() {
+  debug(F("timerRunEnter"));
+  timerDecrementerInterval = timer.setInterval(1000, &decrementTimer);
   setButtonLabel(0, timer_button_label);
 }
 
-void justTimerRunExit() {
-  debug(F("justTimerRunExit"));
-  timer.deleteTimer(justTimerDecrementerInterval);
-  justTimerDecrementerInterval = -1;
+void timerRunExit() {
+  debug(F("timerRunExit"));
+  timer.deleteTimer(timerDecrementerInterval);
+  timerDecrementerInterval = -1;
 }
 
-void justTimerRunLoop() {
-  display_printf_P(2, timer_row_fmt, justTimerSeconds / 3600, (justTimerSeconds / 60) % 60,
-    justTimerSeconds % 60 );
+void timerRunLoop() {
+  display_printf_P(2, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
+    timerSeconds % 60 );
 }
 
-bool from_just_timer_run_to_alarm() {
-  return justTimerSeconds <= 0;
+bool from_timer_run_to_alarm() {
+  return timerSeconds <= 0;
 }
 
 void toggleAlarm() {
