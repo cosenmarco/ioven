@@ -57,7 +57,8 @@ void State::exit()
   }
 }
 
-State* StateMachine::ANY = new State(0);
+State __any(0);
+State* StateMachine::ANY = &__any;
 
 StateMachine::StateMachine(State& initialState, Transition* trans, int transitionsCount) {
   currentState = &initialState;

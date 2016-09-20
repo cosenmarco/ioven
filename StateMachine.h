@@ -46,12 +46,13 @@ typedef struct Transition {
   bool (*transitionFunction)();
 };
 
+
+
 class StateMachine
 {
   public:
-    // GLOBAL state can be used to perform transitions to a state starting from any state
+    // ANY state can be used to perform transitions to a state starting from any state
     static State* ANY;
-
 
     StateMachine(State& initialState, Transition* trans, int transitionsCount);
     void loop();

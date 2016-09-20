@@ -33,8 +33,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define GPIOA 0x12
 #define GPIOB 0x13
 
+// Outputs: on GPA
 #define DISPLAY_MASK 0x01 // The display bit is GPA0
 #define BUZZER_MASK 0x02 // The buzzer bit is GPA1
+#define LIGHT_MASK 0x04 // The Oven light is on GPA2
+#define HEAT_ELEMENT_TOP 0x08
+#define HEAT_ELEMENT_CENTER 0x10
+#define HEAT_ELEMENT_BOTTOM 0x20
+#define HEAT_ELEMENT_GRILL 0x40
+#define VENTILATOR 0x80
+// Useful to turn everything off
+#define ALL_HEATING_ELEMENTS (HEAT_ELEMENT_TOP | HEAT_ELEMENT_CENTER | HEAT_ELEMENT_BOTTOM | HEAT_ELEMENT_GRILL)
+
+// Inputs: on GPA
 #define SWITCH1_MASK 0x20 // Switch 1 is on GPIOB 5
 #define SWITCH2_MASK 0x40 // Switch 2 is on GPIOB 6
 #define SWITCH3_MASK 0x80 // Switch 3 is on GPIOB 7 (active low)
@@ -42,14 +53,44 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define ENCODER_CLK_PIN 3
 #define ENCODER_DT_PIN 4
 
+// Knob positions
+#define OFF_POSITION 0
+#define LIGHT_POSITION 1
+#define CHICKEN_POSITION 2
+#define THREE_ELEMENTS_POSITION 3
+#define PIZZA_POSITION 4
+#define GRILL_POSITION 5
+#define GRILL_VENT_POSITION 6
+#define CAKE_POSITION 7
+
+// Output Bit Config by Program
+#define CHICKEN_PROGRAM (HEAT_ELEMENT_TOP | HEAT_ELEMENT_BOTTOM)
+#define THREE_ELEMENTS_PROGRAM (HEAT_ELEMENT_TOP | HEAT_ELEMENT_CENTER | HEAT_ELEMENT_BOTTOM)
+#define PIZZA_PROGRAM (HEAT_ELEMENT_BOTTOM)
+#define GRILL_PROGRAM (HEAT_ELEMENT_GRILL)
+#define GRILL_VENT_PROGRAM (HEAT_ELEMENT_GRILL)
+#define CAKE_PROGRAM (HEAT_ELEMENT_CENTER)
+
 // String pool in program memory
 const char empty_button_label[] PROGMEM = "          ";
 const char timer_button_label[] PROGMEM = "   timer  ";
 const char start_button_label[] PROGMEM = "   start  ";
 const char cancel_button_label[] PROGMEM = " annulla  ";
+const char continue_button_label[] PROGMEM = " continua ";
+const char shut_down_button_label[] PROGMEM = "  spegni  ";
+
+const char off[] PROGMEM = " SPENTO ";
+const char light[] PROGMEM = "  LUCE  ";
+const char chicken[] PROGMEM = "  POLLO ";
+const char three[] PROGMEM = " 3 ELEM ";
+const char pizza[] PROGMEM = "  PIZZA ";
+const char grill[] PROGMEM = "  GRILL ";
+const char grillvent[] PROGMEM = " GRILL V";
+const char cake[] PROGMEM = "  TORTA ";
+
 
 const char date_row_fmt[] PROGMEM = "%s %02d/%02d/%02d %02d:%02d:%02d";
-const char temperature_row_fmt[] PROGMEM = "%3d\1C";
+const char temperature_row_fmt[] PROGMEM = "%3ld\1C->%3ld\1C%s";
 const char timer_row_fmt[] PROGMEM = "      %d:%02d:%02d";
 const char timer_row_fmt_no_min[] PROGMEM = "      %d:  :%02d";
 const char timer_row_fmt_no_sec[] PROGMEM = "      %d:%02d:  ";
@@ -64,6 +105,15 @@ DateTime now;
 
 byte mcp23017_GPIOA, mcp23017_GPIOB;
 double currentTemperature;
+double temperatureGoal;
+bool previousLoopHeaterStatus; // true = heater was ON in last loop
+const char * currentProgramString = off;
+
+byte currentPosition;
+byte previousLoopPosition;
+byte currentAcceptedPosition;
+byte previousLoopAcceptedPosition;
+byte currentOutputConfiguration;
 
 char daysOfTheWeek[7][3] = {"Do", "Lu", "Ma", "Me", "Gi", "Ve", "Sa"};
 byte deg[8] = {
@@ -83,6 +133,7 @@ int timerDecrementerInterval = -1; // This interval decrements the timer every s
 int alarmInterval = -1; // This is used to toggle between beep on and beep off state to make an alarm
 int alarmTimeoutTimerId = -1;
 int blinkerInterval = -1;
+int positionChangeTimer = -1; // Change in position knob is considered only after 2 seconds of stable knob position
 
 int timerSeconds;
 bool isMinutes;
@@ -109,9 +160,28 @@ bool previousLoopButtonStatus[3] = { false, false, false };
 
 // ################# The State Machine #################
 State offState(&offStateEnter, NULL, &offStateExit);
+State ovenState(&ovenLoop);
 State timerSetState(&timerSetEnter, &timerSetLoop, &timerSetExit);
 State timerRunState(&timerRunEnter, &timerRunLoop, &timerRunExit); // Note: same loop function of timerSetState
 State alarmState(&alarmEnter, NULL, &alarmExit);
+
+Transition fromAnyToOff = {
+  *StateMachine::ANY,
+  offState,
+  &from_any_to_off
+};
+
+Transition fromOffToOven = {
+  offState,
+  ovenState,
+  &from_off_to_oven
+};
+
+Transition fromOvenToTimerSet = {
+  ovenState,
+  timerSetState,
+  &switch1Pressed
+};
 
 Transition fromOffToTimerSet = {
   offState,
@@ -122,7 +192,13 @@ Transition fromOffToTimerSet = {
 Transition fromTimerSetToOff = {
   timerSetState,
   offState,
-  &switch2Pressed
+  &from_timer_to_off
+};
+
+Transition fromTimerSetToOven = {
+  timerSetState,
+  ovenState,
+  &from_timer_to_oven
 };
 
 Transition fromTimerSetToTimerRun = {
@@ -137,10 +213,16 @@ Transition fromTimerRunToTimerSet = {
   &switch1Pressed
 };
 
+Transition fromTimerRunToOven = {
+  timerRunState,
+  timerSetState,
+  &from_timer_to_oven
+};
+
 Transition fromTimerRunToOff = {
   timerRunState,
   offState,
-  &switch2Pressed
+  &from_timer_to_off
 };
 
 Transition fromTimerRunToAlarm = {
@@ -152,13 +234,30 @@ Transition fromTimerRunToAlarm = {
 Transition fromAlarmToOff = {
   alarmState,
   offState,
-  &from_alarm_to_off
+  &switch1Pressed
 };
 
-#define TRANSITIONS_NUM 7
+Transition fromAlarmToOven = {
+  alarmState,
+  offState,
+  &from_timer_to_oven
+};
+
+#define TRANSITIONS_NUM 13
 Transition transitions[TRANSITIONS_NUM] = {
-  fromOffToTimerSet, fromTimerSetToOff, fromTimerRunToTimerSet, fromTimerSetToTimerRun,
-  fromTimerRunToOff, fromTimerRunToAlarm, fromAlarmToOff
+  fromAnyToOff,
+  fromOffToOven,
+  fromOvenToTimerSet,
+  fromOffToTimerSet,
+  fromTimerSetToOff,
+  fromTimerSetToOven,
+  fromTimerSetToTimerRun,
+  fromTimerRunToTimerSet,
+  fromTimerRunToOven,
+  fromTimerRunToOff,
+  fromTimerRunToAlarm,
+  fromAlarmToOff,
+  fromAlarmToOven
 };
 
 StateMachine iOvenStateMachine(offState, transitions, TRANSITIONS_NUM);
@@ -208,7 +307,9 @@ void setup () {
   // wait for thermocouple chip to stabilize
   delay(500);
 
+  readInputs();
   offStateEnter(); // We start from the state OFF
+  currentAcceptedPosition = currentPosition;
 }
 
 
@@ -216,14 +317,19 @@ void setup () {
 void loop () {
   readInputs();
 
-  updateDisplayClock();
-  updateDisplayTemperature();
+  updateDisplayClockLine();
+  updateDisplayStatusLine();
 
   iOvenStateMachine.loop();
   timer.run();
 
+  knobPositionLoop();
+  temperatureControlLoop();
+
   encoderPositionSinceLastLoop = 0;
-  setPreviousLoopButtonsStatus();
+  previousLoopButtonStatus[0] = (mcp23017_GPIOB & SWITCH1_MASK) != 0;
+  previousLoopButtonStatus[1] = (mcp23017_GPIOB & SWITCH2_MASK) != 0;
+  previousLoopButtonStatus[2] = (mcp23017_GPIOB & SWITCH3_MASK) != 0;
 }
 
 void readInputs() {
@@ -236,21 +342,96 @@ void readInputs() {
   Wire.requestFrom(MCP23017_ADDRESS,1);
   mcp23017_GPIOB = Wire.read();
   Wire.endTransmission();
+
+  currentPosition = mcp23017_GPIOB & 0x07; // The first 3 bits of GPIOB
 }
 
-void updateDisplayClock() {
+void updateDisplayClockLine() {
   display_printf_P(0, date_row_fmt, daysOfTheWeek[now.dayOfTheWeek()], now.day(),
     now.month(), now.year() % 100, now.hour(), now.minute(), now.second());
 }
 
-void updateDisplayTemperature() {
-  display_printf_P(1, temperature_row_fmt, round(currentTemperature));
+void updateDisplayStatusLine() {
+  char buffer[11];
+  strcpy_P(buffer, currentProgramString);
+  display_printf_P(1, temperature_row_fmt, lround(currentTemperature), lround(temperatureGoal), buffer);
 }
 
-void setPreviousLoopButtonsStatus() {
-  previousLoopButtonStatus[0] = (mcp23017_GPIOB & SWITCH1_MASK) != 0;
-  previousLoopButtonStatus[1] = (mcp23017_GPIOB & SWITCH2_MASK) != 0;
-  previousLoopButtonStatus[2] = (mcp23017_GPIOB & SWITCH3_MASK) != 0;
+void temperatureControlLoop() {
+  // Temperature control logic: turno on heater unless temp equal or greater than the goal
+  bool currentHeaterStatus = currentTemperature < temperatureGoal;
+  if(currentHeaterStatus != previousLoopHeaterStatus || positionChanged()) {
+    // Either heater status or program changed. We have to update the output config on GPA
+    mcp23017_GPIOA &= ~ALL_HEATING_ELEMENTS;
+    if(currentHeaterStatus) {
+      mcp23017_GPIOA |= currentOutputConfiguration;
+    }
+    sendGPIOA();
+  }
+  previousLoopHeaterStatus = currentHeaterStatus;
+}
+
+void knobPositionLoop() {
+  if(currentPosition != previousLoopPosition) {
+    if(positionChangeTimer >= 0) {
+      timer.restartTimer(positionChangeTimer);
+    } else {
+      positionChangeTimer = timer.setTimeout(2000, &acceptPosition);
+    }
+  }
+  previousLoopPosition = currentPosition;
+  previousLoopAcceptedPosition = currentAcceptedPosition;
+}
+
+// Callback fired when there is a change in the positions knob
+void acceptPosition() {
+  currentAcceptedPosition = currentPosition;
+  positionChangeTimer = -1;
+  switch(currentAcceptedPosition) {
+    case OFF_POSITION:
+    default:
+      turnGPIOAFlagOff(LIGHT_MASK | VENTILATOR);
+      currentProgramString = off;
+      currentOutputConfiguration = 0;
+      break;
+    case LIGHT_POSITION:
+      turnGPIOAFlagOff(VENTILATOR);
+      turnGPIOAFlagOn(LIGHT_MASK);
+      currentProgramString = light;
+      currentOutputConfiguration = 0;
+      break;
+    case CHICKEN_POSITION:
+      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      currentProgramString = chicken;
+      currentOutputConfiguration = CHICKEN_PROGRAM;
+      break;
+    case THREE_ELEMENTS_POSITION:
+      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      currentProgramString = three;
+      currentOutputConfiguration = THREE_ELEMENTS_PROGRAM;
+      break;
+    case PIZZA_POSITION:
+      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      currentProgramString = pizza;
+      currentOutputConfiguration = PIZZA_PROGRAM;
+      break;
+    case GRILL_POSITION:
+      turnGPIOAFlagOff(VENTILATOR);
+      turnGPIOAFlagOn(LIGHT_MASK);
+      currentProgramString = grill;
+      currentOutputConfiguration = GRILL_PROGRAM;
+      break;
+    case GRILL_VENT_POSITION:
+      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      currentProgramString = grillvent;
+      currentOutputConfiguration = GRILL_VENT_PROGRAM;
+      break;
+    case CAKE_POSITION:
+      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      currentProgramString = cake;
+      currentOutputConfiguration = CAKE_PROGRAM;
+      break;
+  }
 }
 
 // ###############  State Machine functions ###############
@@ -262,10 +443,9 @@ void offStateEnter() {
   setButtonLabel(0, timer_button_label);
   setButtonLabel(1, empty_button_label);
 
-  // Init timer to default 60 seconds.
-  // Init happens here and not upon timerSetEnter() because we don't want to change the timer when
-  // switching back and forth from timerSet to timerRun
+  // Some init that are useful for the next time the oven is turned on
   timerSeconds = 60;
+  temperatureGoal = 60.0;
 }
 
 void offStateExit() {
@@ -334,6 +514,13 @@ void timerSetLoop() {
   }
 }
 
+void ovenLoop() {
+  temperatureGoal += encoderPositionSinceLastLoop;
+  if(temperatureGoal < 0) {
+    temperatureGoal = 0;
+  }
+}
+
 void decrementTimer() {
   if (timerSeconds > 0) {
     timerSeconds--;
@@ -353,6 +540,7 @@ void timerRunExit() {
 }
 
 void timerRunLoop() {
+  ovenLoop();
   display_printf_P(2, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
     timerSeconds % 60 );
 }
@@ -370,7 +558,12 @@ void alarmEnter() {
   debug(F("alarmEnter"));
   alarmInterval = timer.setInterval(300, &toggleAlarm);
   alarmTimeoutTimerId = timer.setTimeout(15000, &alarmTimeout);
-  setButtonLabel(0, cancel_button_label);
+  setButtonLabel(0, shut_down_button_label);
+  if(currentAcceptedPosition == OFF_POSITION) {
+    setButtonLabel(1, empty_button_label);
+  } else {
+    setButtonLabel(1, continue_button_label);
+  }
   display_print_P(2, 0, time_over_message);
 }
 
@@ -390,8 +583,20 @@ void alarmTimeout() {
   alarmTimeoutTimerId = -1;
 }
 
-bool from_alarm_to_off() {
-  return switch1Pressed() || switch2Pressed();
+bool from_any_to_off() {
+  return  positionChanged() && currentAcceptedPosition == OFF_POSITION;
+}
+
+bool from_off_to_oven() {
+  return positionChanged() && currentAcceptedPosition != OFF_POSITION;
+}
+
+bool from_timer_to_off() {
+  return switch2Pressed() && currentAcceptedPosition == OFF_POSITION;
+}
+
+bool from_timer_to_oven() {
+  return switch2Pressed() && currentAcceptedPosition != OFF_POSITION;
 }
 
 // ############### Helper functions ###############
@@ -415,6 +620,10 @@ bool switch2Pressed() {
 
 bool switch3Pressed() {
   return (mcp23017_GPIOB & SWITCH3_MASK) && !previousLoopButtonStatus[2];
+}
+
+bool positionChanged() {
+  return currentAcceptedPosition != previousLoopAcceptedPosition;
 }
 
 void sendGPIOA() {
