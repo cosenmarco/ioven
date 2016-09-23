@@ -27,6 +27,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "SimpleTimer.h"
 #include <avr/pgmspace.h>
 
+#define MAX_TEMP 230
+
 // MCP23017
 #define MCP23017_ADDRESS 0x20
 #define IODIRA 0x00
@@ -74,11 +76,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // ################# Strings stored in program memory #########################
 // The labels must be 10 chars wide (excluded terminator)
 const char empty_button_label[] PROGMEM = "          ";
+const char clock_adj_button_label[] PROGMEM = " set clock";
 const char timer_button_label[] PROGMEM = "   timer  ";
 const char start_button_label[] PROGMEM = "   start  ";
 const char cancel_button_label[] PROGMEM = " annulla  ";
 const char continue_button_label[] PROGMEM = " continua ";
 const char shut_down_button_label[] PROGMEM = "  spegni  ";
+const char save_button_label[] PROGMEM = "  salva   ";
+const char arrow_button_label[] PROGMEM = "     \x7E    ";
 
 // Status string. These strings must be 8 chars wide (excluded terminator)
 const char off[] PROGMEM = " SPENTO ";
@@ -97,13 +102,12 @@ const char timer_row_fmt[] PROGMEM = "%2d:%02d:%02d -> %2d:%02d:%02d";
 
 const char time_over_message[] PROGMEM = "   TEMPO  SCADUTO   ";
 const char oven_message[] PROGMEM = "       FORNO        ";
-const char banner_row_fmt[] PROGMEM = {' ', 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, ' ', 'i', 'O', 'v', 'e', 'n', ' ', 0x7E,
-  0x7E, 0x7E, 0x7E, 0x7E, ' ', ' ', 0x0};
+const char banner_row_fmt[] PROGMEM = " \x7F\x7F\x7F\x7F\x7F iOven \x7E\x7E\x7E\x7E\x7E  ";
 
 LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
 RTC_DS1307 rtc;
 MAX6675 thermocouple(13, 12, 11);
-DateTime now, end;
+DateTime now, otherDateTime;
 
 byte mcp23017_GPIOA, mcp23017_GPIOB;
 
@@ -135,31 +139,24 @@ byte deg[8] = {
 };
 
 SimpleTimer timer;
-int timerSetTimeout = -1; // This timer is used to cancel automatically if we stay too long in timerSetState
+int temporaryStateTimeout = -1; // This timer is used to cancel automatically if we stay too long in some temporary state
 int timerDecrementerInterval = -1; // This interval decrements the timer every second
 int alarmInterval = -1; // This is used to toggle between beep on and beep off state to make an alarm
 int alarmTimeoutTimerId = -1;
-int blinkerInterval = -1;
 int positionChangeTimer = -1; // Change in position knob is considered only after 2 seconds of stable knob position
 
 unsigned int timerSeconds;
 bool isMinutes;
-bool blinkStatus;
+bool blinkStatus = true;
+byte clockAdjustPosition = 0;
 
 // Rotary encoder data and handler
 volatile int encoderPositionSinceLastLoop = 0;
 void doEncoderClkTick() {
-  bool clk = digitalRead(ENCODER_CLK_PIN);
-  bool up;
-  if (clk) {
-    up = digitalRead(ENCODER_DT_PIN);
-  } else {
-    up = !digitalRead(ENCODER_DT_PIN);
-  }
-  if (up) {
-    encoderPositionSinceLastLoop --;
-  } else {
+  if(digitalRead(ENCODER_CLK_PIN) == digitalRead(ENCODER_DT_PIN)) {
     encoderPositionSinceLastLoop ++;
+  } else {
+    encoderPositionSinceLastLoop --;
   }
 }
 
@@ -171,11 +168,24 @@ State ovenState(&ovenStateEnter, &ovenLoop, NULL);
 State timerSetState(&timerSetEnter, &timerSetLoop, &timerSetExit);
 State timerRunState(&timerRunEnter, &timerRunLoop, &timerRunExit); // Note: same loop function of timerSetState
 State alarmState(&alarmEnter, NULL, &alarmExit);
+State clockAdjust(&clockAdjustEnter, &clockAdjustLoop, &clockAdjustExit);
 
 Transition fromAnyToOff = {
   *StateMachine::ANY,
   offState,
   &from_any_to_off
+};
+
+Transition fromOffToClockAdjust = {
+  offState,
+  clockAdjust,
+  &switch2Pressed
+};
+
+Transition fromClockAdjustToOff = {
+  clockAdjust,
+  offState,
+  &from_clock_adjust_to_off
 };
 
 Transition fromOffToOven = {
@@ -250,7 +260,7 @@ Transition fromAlarmToOven = {
   &from_timer_to_oven
 };
 
-#define TRANSITIONS_NUM 13
+#define TRANSITIONS_NUM 15
 Transition transitions[TRANSITIONS_NUM] = {
   fromAnyToOff,
   fromOffToOven,
@@ -264,7 +274,9 @@ Transition transitions[TRANSITIONS_NUM] = {
   fromTimerRunToOff,
   fromTimerRunToAlarm,
   fromAlarmToOff,
-  fromAlarmToOven
+  fromAlarmToOven,
+  fromOffToClockAdjust,
+  fromClockAdjustToOff
 };
 
 StateMachine iOvenStateMachine(offState, transitions, TRANSITIONS_NUM);
@@ -308,11 +320,14 @@ void setup () {
   // Setup rotary encoder
   pinMode(ENCODER_CLK_PIN, INPUT);
   pinMode(ENCODER_DT_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, FALLING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, CHANGE);
 
 
   // wait for thermocouple chip to stabilize
   delay(500);
+
+  // Universal blinker. Used to blink something on the display.
+  timer.setInterval(400, &blinkCallback);
 
   readInputs();
   offStateEnter(); // We start from the state OFF
@@ -362,8 +377,10 @@ void readInputs() {
 }
 
 void updateDisplayClockLine() {
-  display_printf_P(0, date_row_fmt, daysOfTheWeek[now.dayOfTheWeek()], now.day(),
-    now.month(), now.year() % 100, now.hour(), now.minute(), now.second());
+  if(!iOvenStateMachine.isInState(clockAdjust)) {
+    display_printf_P(0, date_row_fmt, daysOfTheWeek[now.dayOfTheWeek()], now.day(),
+      now.month(), now.year() % 100, now.hour(), now.minute(), now.second());
+  }
 }
 
 void updateDisplayStatusLine() {
@@ -462,7 +479,7 @@ void offStateEnter() {
   turnGPIOAFlagOff(DISPLAY_MASK | LIGHT_MASK | VENTILATOR);
   display_print_P(2, 0, banner_row_fmt);
   setButtonLabel_P(0, timer_button_label);
-  setButtonLabel_P(1, empty_button_label);
+  setButtonLabel_P(1, clock_adj_button_label);
 
   currentProgramString = off;
   currentOutputConfiguration = 0;
@@ -487,28 +504,23 @@ void ovenStateEnter() {
 
 void timerSetEnter() {
   debug(F("timerSetEnter"));
-  timerSetTimeout = timer.setTimeout(20000, &invokeCancelTimerSet);
-  blinkerInterval = timer.setInterval(500, &blinkCallback);
+  temporaryStateTimeout = timer.setTimeout(20000, &invokeCancelTimerSet);
   isMinutes = true;
-  blinkStatus = true;
   setButtonLabel_P(0, start_button_label);
   setButtonLabel_P(1, cancel_button_label);
 }
 
 void timerSetExit() {
   debug(F("timerSetExit"));
-  if(timerSetTimeout >= 0) {
-    timer.deleteTimer(timerSetTimeout);
-    timerSetTimeout = -1;
+  if(temporaryStateTimeout >= 0) {
+    timer.deleteTimer(temporaryStateTimeout);
+    temporaryStateTimeout = -1;
   }
-  timer.deleteTimer(blinkerInterval);
-  blinkerInterval = -1;
-  blinkStatus = true;
 }
 
 void invokeCancelTimerSet() {
   iOvenStateMachine.performTransitionNow(fromTimerSetToOff);
-  timerSetTimeout = -1;
+  temporaryStateTimeout = -1;
 }
 
 void timerSetLoop() {
@@ -528,17 +540,17 @@ void timerSetLoop() {
       timerSeconds = 0;
     }
 
-    if(timerSetTimeout >= 0) {
-      timer.restartTimer(timerSetTimeout);
+    if(temporaryStateTimeout >= 0) {
+      timer.restartTimer(temporaryStateTimeout);
     }
 
   }
 
   isMinutes ^= switch3Pressed();
 
-  end = now + TimeSpan(timerSeconds);
+  otherDateTime = now + TimeSpan(timerSeconds);
   sprintf_P(buffer, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
-    timerSeconds % 60, end.hour(), end.minute(), end.second());
+    timerSeconds % 60, otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
 
   if(!blinkStatus) {
     if(isMinutes) {
@@ -558,6 +570,9 @@ void ovenLoop() {
   temperatureGoal += encoderPositionSinceLastLoop;
   if(temperatureGoal < 0) {
     temperatureGoal = 0;
+  }
+  if(temperatureGoal > MAX_TEMP) {
+    temperatureGoal = MAX_TEMP;
   }
 }
 
@@ -582,7 +597,7 @@ void timerRunExit() {
 void timerRunLoop() {
   ovenLoop();
   display_printf_P(2, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
-    timerSeconds % 60, end.hour(), end.minute(), end.second());
+    timerSeconds % 60, otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
 }
 
 bool from_timer_run_to_alarm() {
@@ -639,6 +654,98 @@ bool from_timer_to_off() {
 
 bool from_timer_to_oven() {
   return switch2Pressed() && currentAcceptedPosition != OFF_POSITION;
+}
+
+void clockAdjustEnter() {
+  debug(F("clockAdjustEnter"));
+  otherDateTime = DateTime(now);
+  setButtonLabel_P(0, arrow_button_label);
+  setButtonLabel_P(1, save_button_label);
+  temporaryStateTimeout = timer.setTimeout(20000, &invokeCancelTimerSet);
+}
+
+void invokeCancelClockAdjust() {
+  iOvenStateMachine.performTransitionNow(fromClockAdjustToOff);
+  temporaryStateTimeout = -1;
+  clockAdjustPosition = 0;
+}
+
+void clockAdjustLoop() {
+  byte blinkStartPos = 3 + clockAdjustPosition * 3;
+  int newValue;
+
+  if(encoderPositionSinceLastLoop != 0) {
+    timer.restartTimer(temporaryStateTimeout);
+    switch(clockAdjustPosition) {
+      case 0: // Day
+        otherDateTime = otherDateTime + TimeSpan(encoderPositionSinceLastLoop, 0, 0, 0);
+        break;
+      case 1: // Month
+        newValue = otherDateTime.month() + encoderPositionSinceLastLoop;
+        if(newValue < 1) {
+          newValue = 1;
+        }
+        if(newValue > 12) {
+          newValue = 12;
+        }
+        otherDateTime = DateTime(otherDateTime.year(), newValue, otherDateTime.day(),
+          otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
+        break;
+      case 2: // Year
+        newValue = otherDateTime.year() + encoderPositionSinceLastLoop;
+        if(newValue < 2000) {
+          newValue = 2000;
+        }
+        otherDateTime = DateTime(newValue, otherDateTime.month(), otherDateTime.day(),
+          otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
+        break;
+      case 3: // Hour
+        otherDateTime = otherDateTime + TimeSpan(0, encoderPositionSinceLastLoop, 0, 0);
+        break;
+      case 4: // Min
+        otherDateTime = otherDateTime + TimeSpan(0, 0, encoderPositionSinceLastLoop, 0);
+        break;
+      case 5: // Sec
+        otherDateTime = otherDateTime + TimeSpan(0, 0, 0, encoderPositionSinceLastLoop);
+        break;
+    }
+  }
+
+  if(switch1Pressed()) {
+    timer.restartTimer(temporaryStateTimeout);
+    clockAdjustPosition ++;
+    if(clockAdjustPosition > 5) {
+      clockAdjustPosition = 0;
+    }
+  }
+
+  char buffer[21];
+  sprintf_P(buffer, date_row_fmt, daysOfTheWeek[otherDateTime.dayOfTheWeek()], otherDateTime.day(),
+    otherDateTime.month(), otherDateTime.year() % 100, otherDateTime.hour(), otherDateTime.minute(),
+    otherDateTime.second());
+
+  if(!blinkStatus) {
+    buffer[blinkStartPos] = ' ';
+    buffer[blinkStartPos + 1] = ' ';
+  }
+  lcd.setCursor(0, 0);
+  lcd.print(buffer);
+}
+
+void clockAdjustExit() {
+  debug(F("clockAdjustExit"));
+  if(temporaryStateTimeout >= 0) {
+    timer.deleteTimer(temporaryStateTimeout);
+    temporaryStateTimeout = -1;
+  }
+}
+
+bool from_clock_adjust_to_off() {
+  if(switch2Pressed()) {
+    rtc.adjust(otherDateTime);
+    return true;
+  }
+  return false;
 }
 
 // ############### Helper functions ###############
