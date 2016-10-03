@@ -32,25 +32,31 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // MCP23017
 #define MCP23017_ADDRESS 0x20
 #define IODIRA 0x00
-#define GPIOA 0x12
-#define GPIOB 0x13
+#define GPIOA_ADDRESS 0x12
+#define GPIOB_ADDRESS 0x13
+
+// Relais are inverted logic so we have to negate the relais pins
+#define RELAIS_MASK_GPIOA B11111100
+#define RELAIS_MASK_GPIOB B00011000
 
 // Outputs: on GPA
-#define DISPLAY_MASK 0x01 // The display bit is GPA0
-#define BUZZER_MASK 0x02 // The buzzer bit is GPA1
-#define LIGHT_MASK 0x04 // The Oven light is on GPA2
-#define HEAT_ELEMENT_TOP 0x08
-#define HEAT_ELEMENT_CENTER 0x10
-#define HEAT_ELEMENT_BOTTOM 0x20
-#define HEAT_ELEMENT_GRILL 0x40
-#define VENTILATOR 0x80
+#define DISPLAY_MASK        B00000001 // GPA0
+#define BUZZER_MASK         B00000010 // GPA1
+#define LIGHT               B00011000 // GPB3 and GPB4
+#define HEAT_ELEMENT_TOP    B00100000 // GPA5
+#define HEAT_ELEMENT_CENTER B00010000 // GPA4
+#define HEAT_ELEMENT_BOTTOM B00001000 // GPA3
+#define HEAT_ELEMENT_GRILL  B00000100 // GPA2
+#define VENTILATOR          B01000000 // GPA6
+#define INDICATOR           B10000000 // GPA7
+
 // Useful to turn everything off
 #define ALL_HEATING_ELEMENTS (HEAT_ELEMENT_TOP | HEAT_ELEMENT_CENTER | HEAT_ELEMENT_BOTTOM | HEAT_ELEMENT_GRILL)
 
 // Inputs: on GPA
-#define SWITCH1_MASK 0x20 // Switch 1 is on GPIOB 5
-#define SWITCH2_MASK 0x40 // Switch 2 is on GPIOB 6
-#define SWITCH3_MASK 0x80 // Switch 3 is on GPIOB 7 (active low)
+#define SWITCH1_MASK B00100000 // Switch 1 is on GPIOB 5
+#define SWITCH2_MASK B01000000 // Switch 2 is on GPIOB 6
+#define SWITCH3_MASK B10000000 // Switch 3 is on GPIOB 7 (active low)
 
 #define ENCODER_CLK_PIN 3
 #define ENCODER_DT_PIN 4
@@ -109,7 +115,7 @@ RTC_DS1307 rtc;
 MAX6675 thermocouple(13, 12, 11);
 DateTime now, otherDateTime;
 
-byte mcp23017_GPIOA, mcp23017_GPIOB;
+byte mcp23017_GPIOA = 0, mcp23017_GPIOB = 0;
 
 double currentTemperature;
 double temperatureGoal;
@@ -312,10 +318,13 @@ void setup () {
   Wire.beginTransmission(MCP23017_ADDRESS);
   Wire.write(IODIRA);
   Wire.write(0x00); // set all of port A to outputs
-  Wire.write(0xFF); // Next register is IODIRB. Set all of port B to inputs
+  Wire.write(B11100111); // Next register is IODIRB. Set all of port B to inputs except 3 and 4
   Wire.write(0x00); // Next register is IPOLA. Set all of ports to normal
   Wire.write(0x80); // Next register is IPOLB. Set GPB7 as active low
   Wire.endTransmission();
+
+  sendGPIOA();
+  sendGPIOB();
 
   // Setup rotary encoder
   pinMode(ENCODER_CLK_PIN, INPUT);
@@ -346,7 +355,7 @@ void loop () {
   updateDisplayStatusLine();
 
   knobPositionLoop();
-  temperatureControlLoop(); // This must be the last as devisions are taken earlier about currentOutputConfiguration
+  temperatureControlLoop(); // This must be the last as decisions are taken earlier about currentOutputConfiguration
 
   resetPreviousVariables();
 }
@@ -368,12 +377,12 @@ void readInputs() {
 
   // Read the status of switches
   Wire.beginTransmission(MCP23017_ADDRESS);
-  Wire.write(GPIOB);
-  Wire.requestFrom(MCP23017_ADDRESS,1);
+  Wire.write(GPIOB_ADDRESS);
+  Wire.requestFrom(MCP23017_ADDRESS, 1);
   mcp23017_GPIOB = Wire.read();
   Wire.endTransmission();
 
-  currentPosition = mcp23017_GPIOB & 0x07; // The first 3 bits of GPIOB
+  currentPosition = mcp23017_GPIOB & B00000111; // The first 3 bits of GPIOB
 }
 
 void updateDisplayClockLine() {
@@ -395,8 +404,10 @@ void temperatureControlLoop() {
   if(currentHeaterStatus != previousLoopHeaterStatus || currentOutputConfiguration != previousLoopOutputConfiguration) {
     // Either heater status or output config changed. We have to update the output config on GPA
     mcp23017_GPIOA &= ~ALL_HEATING_ELEMENTS;
+    mcp23017_GPIOA &= ~INDICATOR;
     if(currentHeaterStatus && currentOutputConfiguration > 0) {
       mcp23017_GPIOA |= currentOutputConfiguration;
+      mcp23017_GPIOA |= INDICATOR;
       debug(F("HEATING ON"));
     } else {
       debug(F("HEATING OFF"));
@@ -408,6 +419,7 @@ void temperatureControlLoop() {
 void knobPositionLoop() {
   if(currentPosition != previousLoopPosition) {
     debug(F("Position changed"));
+    Serial.println(currentPosition);
     if(positionChangeTimer >= 0) {
       timer.restartTimer(positionChangeTimer);
     } else {
@@ -418,54 +430,63 @@ void knobPositionLoop() {
 
 // Callback fired when there is a change in the positions knob
 void acceptPosition() {
-  currentAcceptedPosition = currentPosition;
+  if(currentAcceptedPosition != currentPosition) {
+    currentAcceptedPosition = currentPosition;
+    debug(F("Accepted New Position"));
+    Serial.println(currentAcceptedPosition);
+    updateOutputsBasedOnCurrentProgram();
+  }
   positionChangeTimer = -1;
-  debug(F("Accepted New Position"));
-  updateOutputsBasedOnCurrentProgram();
 }
 
 void updateOutputsBasedOnCurrentProgram() {
   switch(currentAcceptedPosition) {
     case OFF_POSITION:
     default:
-      turnGPIOAFlagOff(LIGHT_MASK | VENTILATOR);
+      turnGPIOAFlagOff(VENTILATOR);
+      turnGPIOBFlagOff(LIGHT);
       currentProgramString = off;
       currentOutputConfiguration = 0;
       break;
     case LIGHT_POSITION:
       turnGPIOAFlagOff(VENTILATOR);
-      turnGPIOAFlagOn(LIGHT_MASK);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = light;
       currentOutputConfiguration = 0;
       break;
     case CHICKEN_POSITION:
-      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      turnGPIOAFlagOn(VENTILATOR);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = chicken;
       currentOutputConfiguration = CHICKEN_PROGRAM;
       break;
     case THREE_ELEMENTS_POSITION:
-      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      turnGPIOAFlagOn(VENTILATOR);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = three;
       currentOutputConfiguration = THREE_ELEMENTS_PROGRAM;
       break;
     case PIZZA_POSITION:
-      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      turnGPIOAFlagOn(VENTILATOR);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = pizza;
       currentOutputConfiguration = PIZZA_PROGRAM;
       break;
     case GRILL_POSITION:
       turnGPIOAFlagOff(VENTILATOR);
-      turnGPIOAFlagOn(LIGHT_MASK);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = grill;
       currentOutputConfiguration = GRILL_PROGRAM;
       break;
     case GRILL_VENT_POSITION:
-      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      turnGPIOAFlagOn(VENTILATOR);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = grillvent;
       currentOutputConfiguration = GRILL_VENT_PROGRAM;
       break;
     case CAKE_POSITION:
-      turnGPIOAFlagOn(LIGHT_MASK | VENTILATOR);
+      turnGPIOAFlagOn(VENTILATOR);
+      turnGPIOBFlagOn(LIGHT);
       currentProgramString = cake;
       currentOutputConfiguration = CAKE_PROGRAM;
       break;
@@ -476,7 +497,7 @@ void updateOutputsBasedOnCurrentProgram() {
 void offStateEnter() {
   debug(F("offStateEnter"));
   longBeep();
-  turnGPIOAFlagOff(DISPLAY_MASK | LIGHT_MASK | VENTILATOR);
+  turnGPIOAFlagOff(DISPLAY_MASK | LIGHT | VENTILATOR);
   display_print_P(2, 0, banner_row_fmt);
   setButtonLabel_P(0, timer_button_label);
   setButtonLabel_P(1, clock_adj_button_label);
@@ -519,7 +540,11 @@ void timerSetExit() {
 }
 
 void invokeCancelTimerSet() {
-  iOvenStateMachine.performTransitionNow(fromTimerSetToOff);
+  if(currentAcceptedPosition == OFF_POSITION) {
+    iOvenStateMachine.performTransitionNow(fromTimerSetToOff);
+  } else {
+    iOvenStateMachine.performTransitionNow(fromTimerSetToOven);
+  }
   temporaryStateTimeout = -1;
 }
 
@@ -759,6 +784,16 @@ void turnGPIOAFlagOn(byte mask) {
   sendGPIOA();
 }
 
+void turnGPIOBFlagOff(byte mask) {
+  mcp23017_GPIOB &= ~mask;
+  sendGPIOB();
+}
+
+void turnGPIOBFlagOn(byte mask) {
+  mcp23017_GPIOB |= mask;
+  sendGPIOB();
+}
+
 bool switch1Pressed() {
   return (mcp23017_GPIOB & SWITCH1_MASK) && !previousLoopButtonStatus[0];
 }
@@ -776,9 +811,18 @@ bool positionChanged() {
 }
 
 void sendGPIOA() {
+  byte value = mcp23017_GPIOA ^ RELAIS_MASK_GPIOA;
   Wire.beginTransmission(MCP23017_ADDRESS);
-  Wire.write(GPIOA);
-  Wire.write(mcp23017_GPIOA);
+  Wire.write(GPIOA_ADDRESS);
+  Wire.write(value);
+  Wire.endTransmission();
+}
+
+void sendGPIOB() {
+  byte value = mcp23017_GPIOB ^ RELAIS_MASK_GPIOB;
+  Wire.beginTransmission(MCP23017_ADDRESS);
+  Wire.write(GPIOB_ADDRESS);
+  Wire.write(value);
   Wire.endTransmission();
 }
 
@@ -791,15 +835,13 @@ void turnBuzzerOff() {
 }
 
 void beep() {
-  debug(F("beep"));
   turnGPIOAFlagOn(BUZZER_MASK);
-  timer.setTimeout(100, &turnBuzzerOff);
+  timer.setTimeout(50, &turnBuzzerOff);
 }
 
 void longBeep() {
-  debug(F("longbeep"));
   turnGPIOAFlagOn(BUZZER_MASK);
-  timer.setTimeout(300, &turnBuzzerOff);
+  timer.setTimeout(150, &turnBuzzerOff);
 }
 
 void blinkCallback() {
