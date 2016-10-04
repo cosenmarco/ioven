@@ -86,7 +86,7 @@ bool StateMachine::isInState(State &state) const {
 }
 
 void StateMachine::performTransitionNow(Transition &transition) {
-  transition.from.exit();
+  currentState->exit();
   transition.to.enter();
   currentState = &(transition.to);
 }

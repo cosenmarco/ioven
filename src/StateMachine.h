@@ -38,7 +38,7 @@ class State
 };
 
 
-typedef struct Transition {
+struct Transition {
   State& from;
   State& to;
 
@@ -52,6 +52,7 @@ class StateMachine
 {
   public:
     // ANY state can be used to perform transitions to a state starting from any state
+    // NOTE: Cannot be used as "to" state for a transition
     static State* ANY;
 
     StateMachine(State& initialState, Transition* trans, int transitionsCount);
