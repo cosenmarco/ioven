@@ -387,7 +387,10 @@ void readInputs() {
   // Read the status of switches
   mcp23017_GPIOB = expander.readGPIOB();
 
-  currentPosition = mcp23017_GPIOB & B00000111; // The first 3 bits of GPIOB
+  if( (mcp23017_GPIOB & SWITCH3_MASK) && encoderPositionSinceLastLoop != 0) {
+    // When SW3 is pressed and at same time encoder is rotated: we change position
+    currentPosition = (currentPosition + encoderPositionSinceLastLoop) % 7;
+  }
   if(currentPosition != previousLoopPosition) {
     Serial.print(F("Position changed to "));
     Serial.println(currentPosition);
@@ -457,7 +460,10 @@ void currentProgramLoop() {
   }
 }
 
+// ########################################################
 // ###############  State Machine functions ###############
+// ########################################################
+
 void offStateEnter() {
   Serial.println(F("offStateEnter"));
   longBeep();
@@ -747,7 +753,10 @@ bool from_clock_adjust_to_off() {
   return false;
 }
 
+
+// ################################################
 // ############### Helper functions ###############
+// ################################################
 void turnGPIOAFlagOff(byte mask) {
   mcp23017_GPIOA &= ~mask;
   sendGPIOA();
