@@ -24,16 +24,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <max6675.h>
 #include <LiquidCrystal.h>
 #include <math.h>
+#include "MCP23017.h"
 #include "StateMachine.h"
 #include "SimpleTimer.h"
 
 #define MAX_TEMP 230
 
 // MCP23017
-#define MCP23017_ADDRESS 0x20
-#define IODIRA 0x00
-#define GPIOA_ADDRESS 0x12
-#define GPIOB_ADDRESS 0x13
 #define GPIOB_OUTPUT_MASK B00011000
 
 // Relais are inverted logic so we have to negate the relais pins
@@ -127,6 +124,7 @@ const char banner_row_fmt[] PROGMEM = " \x7F\x7F\x7F\x7F\x7F iOven \x7E\x7E\x7E\
 LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
 RTC_DS1307 rtc;
 MAX6675 thermocouple(13, 12, 11);
+MCP23017 expander;
 
 DateTime now, otherDateTime;
 
@@ -332,13 +330,12 @@ void setup () {
   lcd.begin(20, 4);
 
   // Initialize MCP23017
-  Wire.beginTransmission(MCP23017_ADDRESS);
-  Wire.write(IODIRA); // First register address. It is automatically incremented by 1 after every write.
-  Wire.write(B00000000); // IODIRA Set all of port A to outputs
-  Wire.write(B11100111); // IODIRB Set all of port B to inputs except 3 and 4
-  Wire.write(B00000000); // IPOLA Set all of ports to normal
-  Wire.write(B10000000); // IPOLB Set GPB7 as active low
-  Wire.endTransmission();
+  expander.init(
+    B00000000, // IODIRA Set all of port A to outputs
+    B11100111, // IODIRB Set all of port B to inputs except 3 and 4
+    B00000000, // IPOLA Set all of ports to normal
+    B10000000  // IPOLB Set GPB7 as active low
+  );
 
   sendGPIOA();
   sendGPIOB();
@@ -347,10 +344,6 @@ void setup () {
   pinMode(ENCODER_CLK_PIN, INPUT);
   pinMode(ENCODER_DT_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, CHANGE);
-
-
-  // wait for thermocouple chip to stabilize
-  delay(500);
 
   // Universal blinker. Used to blink something on the display.
   timer.setInterval(400, &blinkCallback);
@@ -392,11 +385,7 @@ void readInputs() {
   currentTemperature = thermocouple.readCelsius();
 
   // Read the status of switches
-  Wire.beginTransmission(MCP23017_ADDRESS);
-  Wire.write(GPIOB_ADDRESS);
-  Wire.endTransmission();
-  Wire.requestFrom(MCP23017_ADDRESS, 1);
-  mcp23017_GPIOB = Wire.read();
+  mcp23017_GPIOB = expander.readGPIOB();
 
   currentPosition = mcp23017_GPIOB & B00000111; // The first 3 bits of GPIOB
   if(currentPosition != previousLoopPosition) {
@@ -786,19 +775,11 @@ bool positionChanged() {
 }
 
 void sendGPIOA() {
-  byte value = mcp23017_GPIOA ^ RELAIS_MASK_GPIOA;
-  Wire.beginTransmission(MCP23017_ADDRESS);
-  Wire.write(GPIOA_ADDRESS);
-  Wire.write(value);
-  Wire.endTransmission();
+  expander.writeGPIOA(mcp23017_GPIOA ^ RELAIS_MASK_GPIOA);
 }
 
 void sendGPIOB() {
-  byte value = (mcp23017_GPIOB ^ RELAIS_MASK_GPIOB) & GPIOB_OUTPUT_MASK;
-  Wire.beginTransmission(MCP23017_ADDRESS);
-  Wire.write(GPIOB_ADDRESS);
-  Wire.write(value);
-  Wire.endTransmission();
+  expander.writeGPIOB((mcp23017_GPIOB ^ RELAIS_MASK_GPIOB) & GPIOB_OUTPUT_MASK);
 }
 
 void turnBuzzerOff() {
