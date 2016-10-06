@@ -41,15 +41,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define DISPLAY_MASK        B00000001 // GPA0
 #define BUZZER_MASK         B00000010 // GPA1
 #define LIGHT               B00011000 // GPB3 and GPB4
-#define HEAT_ELEMENT_TOP    B00100000 // GPA5
-#define HEAT_ELEMENT_CENTER B00010000 // GPA4
-#define HEAT_ELEMENT_BOTTOM B00001000 // GPA3
-#define HEAT_ELEMENT_GRILL  B00000100 // GPA2
+#define R1                  B00100000 // GPA5
+#define R2                  B00010000 // GPA4
+#define R3                  B00001000 // GPA3
+#define R4                  B00000100 // GPA2
 #define VENTILATOR          B01000000 // GPA6
 #define INDICATOR           B10000000 // GPA7
 
 // Useful to turn everything off
-#define ALL_HEATING_ELEMENTS (HEAT_ELEMENT_TOP | HEAT_ELEMENT_CENTER | HEAT_ELEMENT_BOTTOM | HEAT_ELEMENT_GRILL)
+#define ALL_HEATING_ELEMENTS (R1 | R2 | R3 | R4)
 #define ALL_OVEN_OUTPUTS_GPIOA (ALL_HEATING_ELEMENTS | VENTILATOR | INDICATOR)
 
 // Inputs: on GPA
@@ -71,12 +71,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define CAKE_POSITION 7
 
 // Output Bit Config by Program
-#define CHICKEN_ELEMENTS (HEAT_ELEMENT_TOP | HEAT_ELEMENT_BOTTOM)
-#define THREE_ELEMENTS (HEAT_ELEMENT_TOP | HEAT_ELEMENT_CENTER | HEAT_ELEMENT_BOTTOM)
-#define PIZZA_ELEMENTS (HEAT_ELEMENT_BOTTOM)
-#define GRILL_ELEMENTS (HEAT_ELEMENT_GRILL)
-#define GRILL_VENT_ELEMENTS (HEAT_ELEMENT_GRILL)
-#define CAKE_ELEMENTS (HEAT_ELEMENT_CENTER)
+#define CHICKEN_ELEMENTS (R1 | R3)
+#define THREE_ELEMENTS (R2 | R4)
+#define PIZZA_ELEMENTS (R1 | R2 | R3)
+#define GRILL_ELEMENTS (R3 | R4)
+#define GRILL_VENT_ELEMENTS (R3 | R4)
+#define CAKE_ELEMENTS (R2)
 
 // Programs
 #define OFF_PROGRAM 0
@@ -101,7 +101,7 @@ const char save_button_label[] PROGMEM = "  salva   ";
 const char arrow_button_label[] PROGMEM = "     \x7E    ";
 
 // Status string. These strings must be 8 chars wide (excluded terminator)
-const char off[] PROGMEM = " SPENTO ";
+const char off[] PROGMEM = "  -OFF- ";
 const char light[] PROGMEM = "  LUCE  ";
 const char chicken[] PROGMEM = "  POLLO ";
 const char three[] PROGMEM = " 3 ELEM ";
@@ -136,12 +136,10 @@ double temperatureGoal;
 bool currentHeaterStatus;
 bool previousLoopHeaterStatus;
 
-const char * currentProgramString = off;
-
 byte currentProgram = OFF;
 byte previousLoopProgram;
 
-byte currentPosition;
+byte currentPosition = OFF_POSITION;
 byte previousLoopPosition;
 
 byte currentAcceptedPosition;
@@ -308,7 +306,7 @@ StateMachine iOvenStateMachine(offState, transitions, TRANSITIONS_NUM);
 
 // Setup function. Executed once at startup
 void setup () {
-  Serial.begin(28800);
+  Serial.begin(9600);
   Wire.begin();
 
   delay(500);
@@ -351,6 +349,8 @@ void setup () {
   readInputs();
   offStateEnter(); // We start from the state OFF
   resetPreviousVariables();
+
+  Serial.println(F("Init complete!!!"));
 }
 
 
@@ -389,7 +389,9 @@ void readInputs() {
 
   if( (mcp23017_GPIOB & SWITCH3_MASK) && encoderPositionSinceLastLoop != 0) {
     // When SW3 is pressed and at same time encoder is rotated: we change position
-    currentPosition = (currentPosition + encoderPositionSinceLastLoop) % 7;
+    currentPosition = (currentPosition + encoderPositionSinceLastLoop) % 8;
+    // Do not affect other states: we took the encoder turns for us here.
+    encoderPositionSinceLastLoop = 0;
   }
   if(currentPosition != previousLoopPosition) {
     Serial.print(F("Position changed to "));
@@ -421,7 +423,7 @@ void updateDisplayClockLine() {
 
 void updateDisplayStatusLine() {
   char buffer[11];
-  strcpy_P(buffer, currentProgramString);
+  strcpy_P(buffer, programStringsByProgram[currentPosition]);
   display_printf_P(1, temperature_row_fmt, lround(currentTemperature), lround(temperatureGoal), buffer);
 }
 
@@ -447,7 +449,6 @@ void currentProgramLoop() {
     if(currentProgram != OFF_PROGRAM) {
       mcp23017_GPIOB |= LIGHT;
     }
-    currentProgramString = programStringsByProgram[currentProgram];
 
     // Finally send outputs
     sendGPIOA();
