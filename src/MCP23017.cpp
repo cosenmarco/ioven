@@ -22,13 +22,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 MCP23017::MCP23017() {}
 
-void MCP23017::init(uint8_t iodira, uint8_t iodirb, uint8_t ipola, uint8_t ipolb) {
+void MCP23017::init(uint8_t iodira, uint8_t iodirb, uint8_t ipola, uint8_t ipolb,
+    uint8_t gppua, uint8_t gppub) {
   Wire.beginTransmission(MCP23017_I2C_ADDRESS);
   Wire.write(IODIRA_ADDRESS);
   Wire.write(iodira);
   Wire.write(iodirb);
   Wire.write(ipola);
   Wire.write(ipolb);
+  Wire.endTransmission();
+
+  Wire.beginTransmission(MCP23017_I2C_ADDRESS);
+  Wire.write(GPPUA_ADDRESS);
+  Wire.write(gppua);
+  Wire.write(gppub);
   Wire.endTransmission();
 }
 
@@ -40,11 +47,11 @@ void MCP23017::writeTo(uint8_t address, uint8_t value) {
 }
 
 void MCP23017::writeGPIOA(uint8_t value) {
-  this->writeTo(GPIOA_ADDRESS, value);
+  writeTo(GPIOA_ADDRESS, value);
 }
 
 void MCP23017::writeGPIOB(uint8_t value) {
-  this->writeTo(GPIOB_ADDRESS, value);
+  writeTo(GPIOB_ADDRESS, value);
 }
 
 uint8_t MCP23017::readFrom(uint8_t address) {
@@ -56,9 +63,9 @@ uint8_t MCP23017::readFrom(uint8_t address) {
 }
 
 uint8_t MCP23017::readGPIOA() {
-  return this->readFrom(GPIOA_ADDRESS);
+  return readFrom(GPIOA_ADDRESS);
 }
 
 uint8_t MCP23017::readGPIOB() {
-  return this->readFrom(GPIOB_ADDRESS);
+  return readFrom(GPIOB_ADDRESS);
 }

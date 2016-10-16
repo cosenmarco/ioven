@@ -22,6 +22,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #define MCP23017_I2C_ADDRESS 0x20
 #define IODIRA_ADDRESS 0x00
+#define GPPUA_ADDRESS 0x0C
 #define GPIOA_ADDRESS 0x12
 #define GPIOB_ADDRESS 0x13
 
@@ -30,7 +31,8 @@ class MCP23017 {
   public:
     MCP23017();
 
-    void init(uint8_t iodira, uint8_t iodirb, uint8_t iopola, uint8_t iopolb);
+    void init(uint8_t iodira, uint8_t iodirb, uint8_t iopola, uint8_t iopolb,
+      uint8_t gppua, uint8_t gppub);
 
     void writeGPIOA(uint8_t value);
     void writeGPIOB(uint8_t value);

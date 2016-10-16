@@ -17,8 +17,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-// Date and time functions using a DS1307 RTC connected via I2C and Wire lib
 #include <avr/pgmspace.h>
+#include <pins_arduino.h>
 #include <Wire.h>
 #include <RTClib.h>
 #include <max6675.h>
@@ -29,36 +29,44 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "SimpleTimer.h"
 
 #define MAX_TEMP 230
-
-// MCP23017
-#define GPIOB_OUTPUT_MASK B00011000
+#define HYSTERESIS_DEGREES 3
 
 // Relais are inverted logic so we have to negate the relais pins
-#define RELAIS_MASK_GPIOA B11111100
-#define RELAIS_MASK_GPIOB B00011000
+#define RELAIS_MASK_GPIOB B00001111
 
-// Outputs: on GPA
-#define DISPLAY_MASK        B00000001 // GPA0
-#define BUZZER_MASK         B00000010 // GPA1
-#define LIGHT               B00011000 // GPB3 and GPB4
-#define R1                  B00100000 // GPA5
-#define R2                  B00010000 // GPA4
-#define R3                  B00001000 // GPA3
-#define R4                  B00000100 // GPA2
-#define VENTILATOR          B01000000 // GPA6
-#define INDICATOR           B10000000 // GPA7
+#define BUZZER_PIN 13
+#define DISPLAY_RS_PIN 4
+#define DISPLAY_E_PIN 5
+#define DISPLAY_D4_PIN 6
+#define DISPLAY_D5_PIN 7
+#define DISPLAY_D6_PIN 8
+#define DISPLAY_D7_PIN 9
+
+#define THERMO_SCK_PIN 12
+#define THERMO_CS_PIN 11
+#define THERMO_SO_PIN 10
+
+#define ENCODER_CLK_PIN 2
+#define ENCODER_DT_PIN 3
+
+// Outputs: on GPB
+#define DISPLAY_MASK        B00000001 // GPIOA0
+#define LIGHT               B00000011 // GPIOB0 and GPB1
+#define INDICATOR           B00000100 // GPIOB2
+#define VENTILATOR          B00001000 // GPIOB3
+#define R1                  B00010000 // GPIOB4
+#define R2                  B00100000 // GPIOB5
+#define R3                  B01000000 // GPIOB6
+#define R4                  B10000000 // GPIOB7
 
 // Useful to turn everything off
 #define ALL_HEATING_ELEMENTS (R1 | R2 | R3 | R4)
 #define ALL_OVEN_OUTPUTS_GPIOA (ALL_HEATING_ELEMENTS | VENTILATOR | INDICATOR)
 
 // Inputs: on GPA
-#define SWITCH1_MASK B00100000 // Switch 1 is on GPIOB 5
-#define SWITCH2_MASK B01000000 // Switch 2 is on GPIOB 6
-#define SWITCH3_MASK B10000000 // Switch 3 is on GPIOB 7 (active low)
-
-#define ENCODER_CLK_PIN 3
-#define ENCODER_DT_PIN 4
+#define SWITCH1_MASK B00100000 // Switch 1 is on GPIOA 5
+#define SWITCH2_MASK B01000000 // Switch 2 is on GPIOA 6
+#define SWITCH3_MASK B10000000 // Switch 3 is on GPIOA 7 (active low)
 
 // Knob positions
 #define OFF_POSITION 0
@@ -112,7 +120,7 @@ const char cake[] PROGMEM = "  TORTA ";
 
 
 const char date_row_fmt[] PROGMEM = "%s %02d/%02d/%02d %02d:%02d:%02d";
-const char temperature_row_fmt[] PROGMEM = "%3ld\1C->%3ld\1C%s";
+const char temperature_row_fmt[] PROGMEM = "%3d\1C->%3d\1C%s";
 const char timer_row_fmt[] PROGMEM = "%2d:%02d:%02d -> %2d:%02d:%02d";
 
 const char time_over_message[] PROGMEM = "   TEMPO  SCADUTO   ";
@@ -121,17 +129,22 @@ const char banner_row_fmt[] PROGMEM = " \x7F\x7F\x7F\x7F\x7F iOven \x7E\x7E\x7E\
 // ################# END Strings stored in program memory #########################
 
 // Peripherals
-LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
+LiquidCrystal lcd(DISPLAY_RS_PIN,
+  DISPLAY_E_PIN,
+  DISPLAY_D4_PIN,
+  DISPLAY_D5_PIN,
+  DISPLAY_D6_PIN,
+  DISPLAY_D7_PIN);
 RTC_DS1307 rtc;
-MAX6675 thermocouple(13, 12, 11);
+MAX6675 thermocouple(THERMO_SCK_PIN, THERMO_CS_PIN, THERMO_SO_PIN);
 MCP23017 expander;
 
 DateTime now, otherDateTime;
 
 byte mcp23017_GPIOA = 0, mcp23017_GPIOB = 0;
 
-double currentTemperature;
-double temperatureGoal;
+int currentTemperature;
+int temperatureGoal;
 
 bool currentHeaterStatus;
 bool previousLoopHeaterStatus;
@@ -139,8 +152,8 @@ bool previousLoopHeaterStatus;
 byte currentProgram = OFF;
 byte previousLoopProgram;
 
-byte currentPosition = OFF_POSITION;
-byte previousLoopPosition;
+int currentPosition = OFF_POSITION;
+int previousLoopPosition;
 
 byte currentAcceptedPosition;
 byte previousLoopAcceptedPosition;
@@ -149,6 +162,7 @@ byte heatingElementsConfigurationByProgram[] = { 0, 0, CHICKEN_ELEMENTS, THREE_E
   GRILL_VENT_ELEMENTS, CAKE_ELEMENTS};
 bool ventilatorByProgram[] = { false, false, true, true, true, false, true, true };
 const char * programStringsByProgram[] = { off, light, chicken, three, pizza, grill, grillvent, cake };
+
 char daysOfTheWeek[7][3] = {"Do", "Lu", "Ma", "Me", "Gi", "Ve", "Sa"};
 byte degreeSymbol[8] = {
   B01110,
@@ -164,7 +178,6 @@ byte degreeSymbol[8] = {
 SimpleTimer timer;
 int temporaryStateTimeout = -1; // This timer is used to cancel automatically if we stay too long in some temporary state
 int timerDecrementerInterval = -1; // This interval decrements the timer every second
-int alarmInterval = -1; // This is used to toggle between beep on and beep off state to make an alarm
 int alarmTimeoutTimerId = -1;
 int positionChangeTimer = -1; // Change in position knob is considered only after 2 seconds of stable knob position
 
@@ -184,13 +197,14 @@ void doEncoderClkTick() {
 }
 
 bool previousLoopButtonStatus[3] = { false, false, false };
+char printBuffer[25];
 
 // ################# The State Machine #################
-State offState(&offStateEnter, NULL, &offStateExit);
-State ovenState(&ovenStateEnter, &ovenLoop, NULL);
+State offState(&offStateEnter, 0, &offStateExit);
+State ovenState(&ovenStateEnter, &ovenLoop, 0);
 State timerSetState(&timerSetEnter, &timerSetLoop, &timerSetExit);
 State timerRunState(&timerRunEnter, &timerRunLoop, &timerRunExit); // Note: same loop function of timerSetState
-State alarmState(&alarmEnter, &ovenLoop, &alarmExit);
+State alarmState(&alarmEnter, &alarmLoop, &alarmExit);
 State clockAdjust(&clockAdjustEnter, &clockAdjustLoop, &clockAdjustExit);
 
 Transition fromAnyToOff = {
@@ -304,7 +318,10 @@ Transition transitions[TRANSITIONS_NUM] = {
 
 StateMachine iOvenStateMachine(offState, transitions, TRANSITIONS_NUM);
 
-// Setup function. Executed once at startup
+void display_printf_P(byte row, const char * fmt, ...);
+
+
+// ############## Setup function. Executed once at startup ################
 void setup () {
   Serial.begin(9600);
   Wire.begin();
@@ -317,10 +334,14 @@ void setup () {
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
-  // NOTE: Initially wanted to use square wave generator attached to interrupt pin 2 to have some sort of
-  // high resolution reliable clock.
-  // NOW Using library SimpleTimer. SQW is still used for the beeper.
-  // attachInterrupt(digitalPinToInterrupt(2), tick, FALLING);
+  // Setup rotary encoder
+  pinMode(ENCODER_CLK_PIN, INPUT);
+  pinMode(ENCODER_DT_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, FALLING);
+
+  // Setup Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
   rtc.writeSqwPinMode(SquareWave4kHz);
 
   // Setup LCD
@@ -329,26 +350,27 @@ void setup () {
 
   // Initialize MCP23017
   expander.init(
-    B00000000, // IODIRA Set all of port A to outputs
-    B11100111, // IODIRB Set all of port B to inputs except 3 and 4
-    B00000000, // IPOLA Set all of ports to normal
-    B10000000  // IPOLB Set GPB7 as active low
+    B11111110, // IODIRA Set all of port A to inputs except 0
+    B00000000, // IODIRB Set all of port B to output
+    B11100000, // IPOLA Set GPA7,6,5 as active low
+    B00000000, // IPOLB Set all of ports to normal
+    B11100000, // GPPUA Set GPA7,6,5 with pull up resistors
+    B00000000  // GPPUB No pull up needed
   );
 
   sendGPIOA();
   sendGPIOB();
 
-  // Setup rotary encoder
-  pinMode(ENCODER_CLK_PIN, INPUT);
-  pinMode(ENCODER_DT_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, CHANGE);
-
-  // Universal blinker. Used to blink something on the display.
-  timer.setInterval(400, &blinkCallback);
-
   readInputs();
   offStateEnter(); // We start from the state OFF
   resetPreviousVariables();
+
+  // Setup sample timers to read inputs and update display on a regular basis
+  timer.setInterval(250, &sampledReadInputs);
+  timer.setInterval(250, &sampledUpdateDisplay);
+
+  // Universal blinker. Used to blink something on the display.
+  timer.setInterval(400, &blinkCallback);
 
   Serial.println(F("Init complete!!!"));
 }
@@ -360,11 +382,8 @@ void loop () {
 
   timer.run(); // This has to happen first because the result of some timouts needs to be caught by logic checks
   iOvenStateMachine.loop();
-
+  currentPositionLoop();
   currentProgramLoop(); // This must be the last because decisions are taken earlier about currentProgram
-
-  updateDisplayClockLine();
-  updateDisplayStatusLine();
 
   resetPreviousVariables();
 }
@@ -375,21 +394,34 @@ void resetPreviousVariables() {
   previousLoopPosition = currentPosition;
   previousLoopAcceptedPosition = currentAcceptedPosition;
   encoderPositionSinceLastLoop = 0;
-  previousLoopButtonStatus[0] = (mcp23017_GPIOB & SWITCH1_MASK) != 0;
-  previousLoopButtonStatus[1] = (mcp23017_GPIOB & SWITCH2_MASK) != 0;
-  previousLoopButtonStatus[2] = (mcp23017_GPIOB & SWITCH3_MASK) != 0;
+  previousLoopButtonStatus[0] = (mcp23017_GPIOA & SWITCH1_MASK) != 0;
+  previousLoopButtonStatus[1] = (mcp23017_GPIOA & SWITCH2_MASK) != 0;
+  previousLoopButtonStatus[2] = (mcp23017_GPIOA & SWITCH3_MASK) != 0;
+}
+
+void sampledReadInputs() {
+  // Affected by the problem described in https://forum.arduino.cc/index.php?topic=189283.0
+  DateTime result = rtc.now();
+  if(result.month() < 13) {
+    now = result;
+  }
+  currentTemperature = (int) lround(thermocouple.readCelsius());
+}
+
+void sampledUpdateDisplay() {
+  updateDisplayClockLine();
+  updateDisplayStatusLine();
 }
 
 void readInputs() {
-  now = rtc.now();
-  currentTemperature = thermocouple.readCelsius();
-
   // Read the status of switches
-  mcp23017_GPIOB = expander.readGPIOB();
+  mcp23017_GPIOA = expander.readGPIOA();
+}
 
-  if( (mcp23017_GPIOB & SWITCH3_MASK) && encoderPositionSinceLastLoop != 0) {
+void currentPositionLoop() {
+  if( switch3CurrentlyPressed() && encoderPositionSinceLastLoop != 0) {
     // When SW3 is pressed and at same time encoder is rotated: we change position
-    currentPosition = (currentPosition + encoderPositionSinceLastLoop) % 8;
+    currentPosition = (((currentPosition + encoderPositionSinceLastLoop) % 8) + 8) % 8;
     // Do not affect other states: we took the encoder turns for us here.
     encoderPositionSinceLastLoop = 0;
   }
@@ -422,36 +454,44 @@ void updateDisplayClockLine() {
 }
 
 void updateDisplayStatusLine() {
-  char buffer[11];
+  char buffer[9];
   strcpy_P(buffer, programStringsByProgram[currentPosition]);
-  display_printf_P(1, temperature_row_fmt, lround(currentTemperature), lround(temperatureGoal), buffer);
+  display_printf_P(1, temperature_row_fmt,
+    currentTemperature,
+    temperatureGoal,
+    buffer
+  );
 }
 
 void currentProgramLoop() {
-  // Temperature control logic: turn on heater unless temp equal or greater than the goal or state is not appropriate
-  currentHeaterStatus = currentTemperature < temperatureGoal && isHeatState();
+  // Temperature control logic: hysteresis
+  if(previousLoopHeaterStatus) {
+    currentHeaterStatus = currentTemperature < temperatureGoal;
+  } else {
+    currentHeaterStatus = currentTemperature < (temperatureGoal - HYSTERESIS_DEGREES);
+  }
+  currentHeaterStatus = currentHeaterStatus && isHeatState();
+
   if(currentHeaterStatus != previousLoopHeaterStatus || currentProgram != previousLoopProgram) {
     // Either heater status or program changed. We have to update the outputs.
     // First: shut down everything
-    mcp23017_GPIOA &= ~ALL_OVEN_OUTPUTS_GPIOA;
-    mcp23017_GPIOB &= ~LIGHT;
+    mcp23017_GPIOB = 0;
 
     // Then turn on stuff one by one again
     if(currentHeaterStatus) {
-      mcp23017_GPIOA |= heatingElementsConfigurationByProgram[currentProgram];
+      mcp23017_GPIOB |= heatingElementsConfigurationByProgram[currentProgram];
       if(heatingElementsConfigurationByProgram[currentProgram] != 0) {
-        mcp23017_GPIOA |= INDICATOR;
+        mcp23017_GPIOB |= INDICATOR;
       }
     }
     if(ventilatorByProgram[currentProgram]) {
-      mcp23017_GPIOA |= VENTILATOR;
+      mcp23017_GPIOB |= VENTILATOR;
     }
     if(currentProgram != OFF_PROGRAM) {
       mcp23017_GPIOB |= LIGHT;
     }
 
     // Finally send outputs
-    sendGPIOA();
     sendGPIOB();
 
     Serial.print(F("currentHeaterStatus: "));
@@ -474,6 +514,8 @@ void offStateEnter() {
   setButtonLabel_P(1, clock_adj_button_label);
 
   currentProgram = OFF_PROGRAM;
+  currentPosition = OFF_POSITION;
+  currentAcceptedPosition = OFF_POSITION;
 
   // Some init that are useful for the next time the oven is turned on
   timerSeconds = 60;
@@ -499,12 +541,14 @@ void ovenLoop() {
 }
 
 void temperatureAdjustLoop() {
-  temperatureGoal += encoderPositionSinceLastLoop;
-  if(temperatureGoal < 0) {
-    temperatureGoal = 0;
-  }
-  if(temperatureGoal > MAX_TEMP) {
-    temperatureGoal = MAX_TEMP;
+  if(!switch3CurrentlyPressed()) {
+    temperatureGoal += encoderPositionSinceLastLoop;
+    if(temperatureGoal < 0) {
+      temperatureGoal = 0;
+    }
+    if(temperatureGoal > MAX_TEMP) {
+      temperatureGoal = MAX_TEMP;
+    }
   }
 }
 
@@ -539,9 +583,7 @@ void invokeCancelTimerSet() {
 }
 
 void timerSetLoop() {
-  char buffer[21];
-
-  if(encoderPositionSinceLastLoop != 0) {
+  if(!switch3CurrentlyPressed() && encoderPositionSinceLastLoop != 0) {
     int sum;
     if(isMinutes) {
       sum = encoderPositionSinceLastLoop * 60 + timerSeconds; // Every tick is 1 minute
@@ -563,21 +605,21 @@ void timerSetLoop() {
   isMinutes ^= switch3Pressed();
 
   otherDateTime = now + TimeSpan(timerSeconds);
-  sprintf_P(buffer, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
+  sprintf_P(printBuffer, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
     timerSeconds % 60, otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
 
   if(!blinkStatus) {
     if(isMinutes) {
-      buffer[3] = ' ';
-      buffer[4] = ' ';
+      printBuffer[3] = ' ';
+      printBuffer[4] = ' ';
     } else {
-      buffer[6] = ' ';
-      buffer[7] = ' ';
+      printBuffer[6] = ' ';
+      printBuffer[7] = ' ';
     }
   }
 
   lcd.setCursor(0, 2);
-  lcd.print(buffer);
+  lcd.print(printBuffer);
 
   currentProgramActuationLoop();
 }
@@ -611,14 +653,8 @@ bool from_timer_run_to_alarm() {
   return timerSeconds <= 0;
 }
 
-void toggleAlarm() {
-  mcp23017_GPIOA ^= BUZZER_MASK;
-  sendGPIOA();
-}
-
 void alarmEnter() {
   Serial.println(F("alarmEnter"));
-  alarmInterval = timer.setInterval(400, &toggleAlarm);
   alarmTimeoutTimerId = timer.setTimeout(15000, &alarmTimeout);
   setButtonLabel_P(0, shut_down_button_label);
   if(currentProgram == OFF_PROGRAM) {
@@ -631,19 +667,26 @@ void alarmEnter() {
 
 void alarmExit() {
   Serial.println(F("alarmExit"));
-  timer.deleteTimer(alarmInterval);
-  alarmInterval = -1;
   if(alarmTimeoutTimerId >= 0) {
     timer.deleteTimer(alarmTimeoutTimerId);
     alarmTimeoutTimerId = -1;
   }
-  turnGPIOAFlagOff(BUZZER_MASK);
+  turnBuzzerOff();
 }
 
 void alarmTimeout() {
   Serial.println(F("alarmTimeout"));
   iOvenStateMachine.performTransitionNow(fromAlarmToOff);
   alarmTimeoutTimerId = -1;
+}
+
+void alarmLoop() {
+  ovenLoop();
+  if(blinkStatus) {
+    turnBuzzerOn();
+  } else {
+    turnBuzzerOff();
+  }
 }
 
 bool from_any_to_off() {
@@ -725,17 +768,16 @@ void clockAdjustLoop() {
     }
   }
 
-  char buffer[21];
-  sprintf_P(buffer, date_row_fmt, daysOfTheWeek[otherDateTime.dayOfTheWeek()], otherDateTime.day(),
+  sprintf_P(printBuffer, date_row_fmt, daysOfTheWeek[otherDateTime.dayOfTheWeek()], otherDateTime.day(),
     otherDateTime.month(), otherDateTime.year() % 100, otherDateTime.hour(), otherDateTime.minute(),
     otherDateTime.second());
 
   if(!blinkStatus) {
-    buffer[blinkStartPos] = ' ';
-    buffer[blinkStartPos + 1] = ' ';
+    printBuffer[blinkStartPos] = ' ';
+    printBuffer[blinkStartPos + 1] = ' ';
   }
   lcd.setCursor(0, 0);
-  lcd.print(buffer);
+  lcd.print(printBuffer);
 }
 
 void clockAdjustExit() {
@@ -769,15 +811,19 @@ void turnGPIOAFlagOn(byte mask) {
 }
 
 bool switch1Pressed() {
-  return (mcp23017_GPIOB & SWITCH1_MASK) && !previousLoopButtonStatus[0];
+  return (mcp23017_GPIOA & SWITCH1_MASK) && !previousLoopButtonStatus[0];
 }
 
 bool switch2Pressed() {
-  return (mcp23017_GPIOB & SWITCH2_MASK) && !previousLoopButtonStatus[1];
+  return (mcp23017_GPIOA & SWITCH2_MASK) && !previousLoopButtonStatus[1];
 }
 
 bool switch3Pressed() {
-  return (mcp23017_GPIOB & SWITCH3_MASK) && !previousLoopButtonStatus[2];
+  return switch3CurrentlyPressed() && !previousLoopButtonStatus[2];
+}
+
+bool switch3CurrentlyPressed() {
+  return (mcp23017_GPIOA & SWITCH3_MASK);
 }
 
 bool positionChanged() {
@@ -785,24 +831,28 @@ bool positionChanged() {
 }
 
 void sendGPIOA() {
-  expander.writeGPIOA(mcp23017_GPIOA ^ RELAIS_MASK_GPIOA);
+  expander.writeGPIOA(mcp23017_GPIOA);
 }
 
 void sendGPIOB() {
-  expander.writeGPIOB((mcp23017_GPIOB ^ RELAIS_MASK_GPIOB) & GPIOB_OUTPUT_MASK);
+  expander.writeGPIOB(mcp23017_GPIOB ^ RELAIS_MASK_GPIOB);
+}
+
+void turnBuzzerOn() {
+  digitalWrite(BUZZER_PIN, HIGH);
 }
 
 void turnBuzzerOff() {
-  turnGPIOAFlagOff(BUZZER_MASK);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
 void beep() {
-  turnGPIOAFlagOn(BUZZER_MASK);
+  turnBuzzerOn();
   timer.setTimeout(50, &turnBuzzerOff);
 }
 
 void longBeep() {
-  turnGPIOAFlagOn(BUZZER_MASK);
+  turnBuzzerOn();
   timer.setTimeout(150, &turnBuzzerOff);
 }
 
@@ -818,22 +868,25 @@ void setButtonLabel_P(bool button, const char * label) {
 
 // Row is the display row in the range 0 to 3
 void display_printf_P(byte row, const char * fmt, ...) {
-  char buffer[21];
   va_list ap;
 
   va_start(ap, fmt);
-  vsprintf_P(buffer, fmt, ap);
+  vsprintf_P(printBuffer, fmt, ap);
   va_end(ap);
 
+  if(strlen(printBuffer) > 20) {
+    Serial.print(F("LONG STRING!!!: "));
+    Serial.println(printBuffer);
+  }
+
   lcd.setCursor(0, row);
-  lcd.print(buffer);
+  lcd.print(printBuffer);
 }
 
 void display_print_P(byte row, byte pos, const char * content) {
-  char buffer[21];
-  strcpy_P(buffer, content);
+  strcpy_P(printBuffer, content);
   lcd.setCursor(pos, row);
-  lcd.print(buffer);
+  lcd.print(printBuffer);
 }
 
 bool isHeatState() {
