@@ -61,7 +61,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Useful to turn everything off
 #define ALL_HEATING_ELEMENTS (R1 | R2 | R3 | R4)
-#define ALL_OVEN_OUTPUTS_GPIOA (ALL_HEATING_ELEMENTS | VENTILATOR | INDICATOR)
 
 // Inputs: on GPA
 #define SWITCH1_MASK B00100000 // Switch 1 is on GPIOA 5
@@ -180,6 +179,7 @@ int temporaryStateTimeout = -1; // This timer is used to cancel automatically if
 int timerDecrementerInterval = -1; // This interval decrements the timer every second
 int alarmTimeoutTimerId = -1;
 int positionChangeTimer = -1; // Change in position knob is considered only after 2 seconds of stable knob position
+int currentProgramDelayTimer = -1;
 
 unsigned int timerSeconds;
 bool isMinutes;
@@ -474,31 +474,41 @@ void currentProgramLoop() {
 
   if(currentHeaterStatus != previousLoopHeaterStatus || currentProgram != previousLoopProgram) {
     // Either heater status or program changed. We have to update the outputs.
-    // First: shut down everything
-    mcp23017_GPIOB = 0;
-
-    // Then turn on stuff one by one again
-    if(currentHeaterStatus) {
-      mcp23017_GPIOB |= heatingElementsConfigurationByProgram[currentProgram];
-      if(heatingElementsConfigurationByProgram[currentProgram] != 0) {
-        mcp23017_GPIOB |= INDICATOR;
-      }
-    }
-    if(ventilatorByProgram[currentProgram]) {
-      mcp23017_GPIOB |= VENTILATOR;
-    }
-    if(currentProgram != OFF_PROGRAM) {
-      mcp23017_GPIOB |= LIGHT;
-    }
-
-    // Finally send outputs
-    sendGPIOB();
-
+    // To avoid surges we have to turn off all heating elements and then turn them on again after 1.5 second        
     Serial.print(F("currentHeaterStatus: "));
     Serial.print(currentHeaterStatus);
     Serial.print(F("  currentProgram: "));
     Serial.println(currentProgram);
+    mcp23017_GPIOB = 0;
+
+    if(ventilatorByProgram[currentProgram]) {
+      mcp23017_GPIOB |= VENTILATOR;
+    }
+
+    if(currentProgram != OFF_PROGRAM) {
+      mcp23017_GPIOB |= LIGHT;
+    }
+
+    sendGPIOB();
+
+    if(currentProgramDelayTimer < 0) {
+      currentProgramDelayTimer = timer.setTimeout(1500, &setProgramOutputs);
+    } // else switch is already scheduled
   }
+}
+
+void setProgramOutputs() {
+  currentProgramDelayTimer = -1;
+  if(currentHeaterStatus) {
+    mcp23017_GPIOB |= heatingElementsConfigurationByProgram[currentProgram];
+    if(heatingElementsConfigurationByProgram[currentProgram] != 0) {
+      mcp23017_GPIOB |= INDICATOR;
+    }
+  }
+
+  // Finally send outputs
+  sendGPIOB();
+  Serial.print(F("Setting heater outputs"));
 }
 
 // ########################################################
