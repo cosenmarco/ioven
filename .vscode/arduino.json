@@ -1,0 +1,7 @@
+{
+    "board": "arduino:avr:nano",
+    "configuration": "cpu=atmega328old",
+    "sketch": "src/iOven.ino",
+    "port": "/dev/ttyUSB0",
+    "output": "out"
+}
