@@ -28,7 +28,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "StateMachine.h"
 #include "SimpleTimer.h"
 
-#define MAX_TEMP 230
+#define MAX_TEMP 350
 #define HYSTERESIS_DEGREES 3
 
 // Relais are inverted logic so we have to negate the relais pins
@@ -123,7 +123,7 @@ const char temperature_row_fmt[] PROGMEM = "%3d\1C->%3d\1C%s";
 const char timer_row_fmt[] PROGMEM = "%2d:%02d:%02d -> %2d:%02d:%02d";
 
 const char time_over_message[] PROGMEM = "   TEMPO  SCADUTO   ";
-const char oven_message[] PROGMEM = "       FORNO        ";
+const char oven_message[] PROGMEM = "    IN FUNZIONE !   ";
 const char banner_row_fmt[] PROGMEM = " \x7F\x7F\x7F\x7F\x7F iOven \x7E\x7E\x7E\x7E\x7E  ";
 // ################# END Strings stored in program memory #########################
 
