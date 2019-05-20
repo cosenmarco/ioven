@@ -46,8 +46,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define THERMO_CS_PIN 11
 #define THERMO_SO_PIN 10
 
-#define ENCODER_CLK_PIN 2
-#define ENCODER_DT_PIN 3
+#define ENCODER_A_PIN 2
+#define ENCODER_B_PIN 3
 
 // Outputs: on GPB
 #define DISPLAY_MASK        B00000001 // GPIOA0
@@ -138,6 +138,61 @@ RTC_DS1307 rtc;
 MAX6675 thermocouple(THERMO_SCK_PIN, THERMO_CS_PIN, THERMO_SO_PIN);
 MCP23017 expander;
 
+// Rotary encoder
+/*
+Explained lookup table
+-------------------------------------------------
+|  current bits  |  previous bist  | accumulate |
+-------------------------------------------------
+|       11       |        10       |     1      |
+|       10       |        00       |     1      |
+|       00       |        01       |     1      |
+|       01       |        11       |     1      |
+|       11       |        01       |    -1      |
+|       01       |        00       |    -1      |
+|       00       |        10       |    -1      |
+|       10       |        11       |    -1      |
+-------------------------------------------------
+Algorithm:
+when we encounter a transition, we look up in the table and we accumulate
+the value associate with the transition in an accumulator.
+When we reach the stable position, we check the value of the accumulator.
+The table is made in such a way, that when the sequence is complete we have a value of
+4 if the knob is rotate CW or -4 if rotated CCW.
+Not reported transitions are basically an error.
+In case current == previous we simply assume the encoder didn't move and the condition
+that triggered the interrupt was a glitch. 
+In case of double transition, we assume also no accumulation.
+*/
+volatile int8_t state = B1100;
+volatile int8_t accumulator = 0;
+int8_t lookupTable[] = {0, 1, -1, 0, -1, 0, 0, 1, 1, 0, 0, -1, 0, -1, 1, 0};
+volatile int encoderSteps = 0;
+void encoderISR() {
+  state >>= 2; // shift 2 bits right so that current bits become previous bits
+  int8_t currentBits = PIND & B00001100;
+  state |= currentBits; // PD2 and PD3 pins are stored in the "current bits" position
+  accumulator += lookupTable[state];
+  if (currentBits == B1100) { // Back home... time to decide what to do
+    if (accumulator >= 4) {
+      accumulator = 0;
+      encoderSteps ++;
+    }
+    if (accumulator <= -4) {
+      accumulator = 0;
+      encoderSteps --;
+    }
+  }
+  // Nice debug trick
+  //UDR0 = 48 + encoderSteps;
+}
+
+int readEncoderAndReset() {
+  int val = encoderSteps;
+  encoderSteps = 0;
+  return val;
+}
+
 DateTime now, otherDateTime;
 
 byte mcp23017_GPIOA = 0, mcp23017_GPIOB = 0;
@@ -186,24 +241,14 @@ bool isMinutes;
 bool blinkStatus = true;
 byte clockAdjustPosition = 0;
 
-// Rotary encoder data and handler
-volatile int encoderPositionSinceLastLoop = 0;
-void doEncoderClkTick() {
-  if(digitalRead(ENCODER_CLK_PIN) == digitalRead(ENCODER_DT_PIN)) {
-    encoderPositionSinceLastLoop ++;
-  } else {
-    encoderPositionSinceLastLoop --;
-  }
-}
-
 bool previousLoopButtonStatus[3] = { false, false, false };
 char printBuffer[25];
 
 // ################# The State Machine #################
-State offState(&offStateEnter, 0, &offStateExit);
+State offState(&offStateEnter, &offStateLoop, &offStateExit);
 State ovenState(&ovenStateEnter, &ovenLoop, 0);
 State timerSetState(&timerSetEnter, &timerSetLoop, &timerSetExit);
-State timerRunState(&timerRunEnter, &timerRunLoop, &timerRunExit); // Note: same loop function of timerSetState
+State timerRunState(&timerRunEnter, &timerRunLoop, &timerRunExit);
 State alarmState(&alarmEnter, &alarmLoop, &alarmExit);
 State clockAdjust(&clockAdjustEnter, &clockAdjustLoop, &clockAdjustExit);
 
@@ -342,9 +387,10 @@ void setup () {
   }
 
   // Setup rotary encoder
-  pinMode(ENCODER_CLK_PIN, INPUT);
-  pinMode(ENCODER_DT_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), doEncoderClkTick, FALLING);
+  pinMode(ENCODER_A_PIN, INPUT);
+  pinMode(ENCODER_B_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), encoderISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_B_PIN), encoderISR, CHANGE);
 
   // Setup Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
@@ -389,7 +435,6 @@ void loop () {
 
   timer.run(); // This has to happen first because the result of some timouts needs to be caught by logic checks
   iOvenStateMachine.loop();
-  currentPositionLoop();
   currentProgramLoop(); // This must be the last because decisions are taken earlier about currentProgram
 
   resetPreviousVariables();
@@ -400,7 +445,6 @@ void resetPreviousVariables() {
   previousLoopProgram = currentProgram;
   previousLoopPosition = currentPosition;
   previousLoopAcceptedPosition = currentAcceptedPosition;
-  encoderPositionSinceLastLoop = 0;
   previousLoopButtonStatus[0] = (mcp23017_GPIOA & SWITCH1_MASK) != 0;
   previousLoopButtonStatus[1] = (mcp23017_GPIOA & SWITCH2_MASK) != 0;
   previousLoopButtonStatus[2] = (mcp23017_GPIOA & SWITCH3_MASK) != 0;
@@ -426,11 +470,10 @@ void readInputs() {
 }
 
 void currentPositionLoop() {
-  if( switch3CurrentlyPressed() && encoderPositionSinceLastLoop != 0) {
+  int encoderSteps = readEncoderAndReset();
+  if( switch3CurrentlyPressed() && encoderSteps != 0) {
     // When SW3 is pressed and at same time encoder is rotated: we change position
-    currentPosition = (((currentPosition + encoderPositionSinceLastLoop) % 8) + 8) % 8;
-    // Do not affect other states: we took the encoder turns for us here.
-    encoderPositionSinceLastLoop = 0;
+    currentPosition = (((currentPosition + encoderSteps) % 8) + 8) % 8;
   }
   if(currentPosition != previousLoopPosition) {
     Serial.print(F("Position changed to "));
@@ -447,8 +490,6 @@ void currentPositionLoop() {
 void acceptPosition() {
   if(currentAcceptedPosition != currentPosition) {
     currentAcceptedPosition = currentPosition;
-    Serial.print(F("Accepted New Position: "));
-    Serial.println(currentAcceptedPosition);
   }
   positionChangeTimer = -1;
 }
@@ -515,7 +556,6 @@ void setProgramOutputs() {
 
   // Finally send outputs
   sendGPIOB();
-  //Serial.println(F("Setting heater outputs"));
 }
 
 // ########################################################
@@ -523,7 +563,6 @@ void setProgramOutputs() {
 // ########################################################
 
 void offStateEnter() {
-  Serial.println(F("offStateEnter"));
   longBeep();
   turnGPIOAFlagOff(DISPLAY_MASK);
   display_print_P(2, 0, banner_row_fmt);
@@ -540,13 +579,15 @@ void offStateEnter() {
 }
 
 void offStateExit() {
-  Serial.println(F("offStateExit"));
   turnGPIOAFlagOn(DISPLAY_MASK);
   beep();
 }
 
+void offStateLoop() {
+  currentPositionLoop();
+}
+
 void ovenStateEnter() {
-  Serial.println(F("ovenEnter"));
   display_print_P(2, 0, oven_message);
   setButtonLabel_P(0, timer_button_label);
   setButtonLabel_P(1, shut_down_button_label);
@@ -555,11 +596,12 @@ void ovenStateEnter() {
 void ovenLoop() {
   temperatureAdjustLoop();
   currentProgramActuationLoop();
+  currentPositionLoop();
 }
 
 void temperatureAdjustLoop() {
   if(!switch3CurrentlyPressed()) {
-    temperatureGoal += encoderPositionSinceLastLoop;
+    temperatureGoal += readEncoderAndReset();
     if(temperatureGoal < 0) {
       temperatureGoal = 0;
     }
@@ -574,7 +616,6 @@ void currentProgramActuationLoop() {
 }
 
 void timerSetEnter() {
-  Serial.println(F("timerSetEnter"));
   temporaryStateTimeout = timer.setTimeout(20000, &invokeCancelTimerSet);
   isMinutes = true;
   setButtonLabel_P(0, start_button_label);
@@ -582,7 +623,6 @@ void timerSetEnter() {
 }
 
 void timerSetExit() {
-  Serial.println(F("timerSetExit"));
   if(temporaryStateTimeout >= 0) {
     timer.deleteTimer(temporaryStateTimeout);
     temporaryStateTimeout = -1;
@@ -590,7 +630,6 @@ void timerSetExit() {
 }
 
 void invokeCancelTimerSet() {
-  Serial.println(F("invokeCancelTimerSet"));
   if(currentProgram == OFF_PROGRAM) {
     iOvenStateMachine.performTransitionNow(fromTimerSetToOff);
   } else {
@@ -600,12 +639,13 @@ void invokeCancelTimerSet() {
 }
 
 void timerSetLoop() {
-  if(!switch3CurrentlyPressed() && encoderPositionSinceLastLoop != 0) {
+  int encoderSteps = readEncoderAndReset();
+  if(!switch3CurrentlyPressed() && encoderSteps != 0) {
     int sum;
     if(isMinutes) {
-      sum = encoderPositionSinceLastLoop * 60 + timerSeconds; // Every tick is 1 minute
+      sum = encoderSteps * 60 + timerSeconds; // Every tick is 1 minute
     } else {
-      sum = encoderPositionSinceLastLoop      + timerSeconds; // Every tick is 1 second
+      sum = encoderSteps      + timerSeconds; // Every tick is 1 second
     }
 
     if(sum >= 0) {
@@ -648,13 +688,11 @@ void decrementTimer() {
 }
 
 void timerRunEnter() {
-  Serial.println(F("timerRunEnter"));
   timerDecrementerInterval = timer.setInterval(1000, &decrementTimer);
   setButtonLabel_P(0, timer_button_label);
 }
 
 void timerRunExit() {
-  Serial.println(F("timerRunExit"));
   timer.deleteTimer(timerDecrementerInterval);
   timerDecrementerInterval = -1;
 }
@@ -664,6 +702,7 @@ void timerRunLoop() {
   currentProgramActuationLoop();
   display_printf_P(2, timer_row_fmt, timerSeconds / 3600, (timerSeconds / 60) % 60,
     timerSeconds % 60, otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
+  currentPositionLoop();
 }
 
 bool from_timer_run_to_alarm() {
@@ -671,7 +710,6 @@ bool from_timer_run_to_alarm() {
 }
 
 void alarmEnter() {
-  Serial.println(F("alarmEnter"));
   alarmTimeoutTimerId = timer.setTimeout(15000, &alarmTimeout);
   setButtonLabel_P(0, shut_down_button_label);
   if(currentProgram == OFF_PROGRAM) {
@@ -683,7 +721,6 @@ void alarmEnter() {
 }
 
 void alarmExit() {
-  Serial.println(F("alarmExit"));
   if(alarmTimeoutTimerId >= 0) {
     timer.deleteTimer(alarmTimeoutTimerId);
     alarmTimeoutTimerId = -1;
@@ -692,7 +729,6 @@ void alarmExit() {
 }
 
 void alarmTimeout() {
-  Serial.println(F("alarmTimeout"));
   iOvenStateMachine.performTransitionNow(fromAlarmToOff);
   alarmTimeoutTimerId = -1;
 }
@@ -723,7 +759,6 @@ bool from_timer_to_oven() {
 }
 
 void clockAdjustEnter() {
-  Serial.println(F("clockAdjustEnter"));
   otherDateTime = DateTime(now);
   setButtonLabel_P(0, arrow_button_label);
   setButtonLabel_P(1, save_button_label);
@@ -739,15 +774,16 @@ void invokeCancelClockAdjust() {
 void clockAdjustLoop() {
   byte blinkStartPos = 3 + clockAdjustPosition * 3;
   int newValue;
+  int encoderSteps = readEncoderAndReset();
 
-  if(encoderPositionSinceLastLoop != 0) {
+  if(encoderSteps != 0) {
     timer.restartTimer(temporaryStateTimeout);
     switch(clockAdjustPosition) {
       case 0: // Day
-        otherDateTime = otherDateTime + TimeSpan(encoderPositionSinceLastLoop, 0, 0, 0);
+        otherDateTime = otherDateTime + TimeSpan(encoderSteps, 0, 0, 0);
         break;
       case 1: // Month
-        newValue = otherDateTime.month() + encoderPositionSinceLastLoop;
+        newValue = otherDateTime.month() + encoderSteps;
         if(newValue < 1) {
           newValue = 1;
         }
@@ -758,7 +794,7 @@ void clockAdjustLoop() {
           otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
         break;
       case 2: // Year
-        newValue = otherDateTime.year() + encoderPositionSinceLastLoop;
+        newValue = otherDateTime.year() + encoderSteps;
         if(newValue < 2000) {
           newValue = 2000;
         }
@@ -766,13 +802,13 @@ void clockAdjustLoop() {
           otherDateTime.hour(), otherDateTime.minute(), otherDateTime.second());
         break;
       case 3: // Hour
-        otherDateTime = otherDateTime + TimeSpan(0, encoderPositionSinceLastLoop, 0, 0);
+        otherDateTime = otherDateTime + TimeSpan(0, encoderSteps, 0, 0);
         break;
       case 4: // Min
-        otherDateTime = otherDateTime + TimeSpan(0, 0, encoderPositionSinceLastLoop, 0);
+        otherDateTime = otherDateTime + TimeSpan(0, 0, encoderSteps, 0);
         break;
       case 5: // Sec
-        otherDateTime = otherDateTime + TimeSpan(0, 0, 0, encoderPositionSinceLastLoop);
+        otherDateTime = otherDateTime + TimeSpan(0, 0, 0, encoderSteps);
         break;
     }
   }
@@ -798,7 +834,6 @@ void clockAdjustLoop() {
 }
 
 void clockAdjustExit() {
-  Serial.println(F("clockAdjustExit"));
   if(temporaryStateTimeout >= 0) {
     timer.deleteTimer(temporaryStateTimeout);
     temporaryStateTimeout = -1;
