@@ -68,13 +68,16 @@ StateMachine::StateMachine(State& initialState, Transition* trans, int transitio
 
 void StateMachine::loop() {
   int i;
+
+  currentState->loop();
+
   for(i=0; i<transCount; i++) {
-    if ((&(transitions[i].from) == currentState || &(transitions[i].from) == StateMachine::ANY) && transitions[i].transitionFunction()) {
-      this->performTransitionNow(transitions[i]);
+    if ((&(transitions[i].from) == currentState || &(transitions[i].from) == StateMachine::ANY) &&
+        transitions[i].transitionFunction()) {
+      performTransitionNow(transitions[i]);
       break;
     }
   }
-  this->currentState->loop();
 }
 
 State& StateMachine::getCurrentState() const {
