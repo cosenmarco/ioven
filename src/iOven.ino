@@ -231,6 +231,12 @@ Transition fromOffToOven = {
   &from_off_to_oven
 };
 
+Transition fromOvenToOff = {
+  ovenState,
+  offState,
+  &switch2Pressed
+};
+
 Transition fromOvenToTimerSet = {
   ovenState,
   timerSetState,
@@ -297,10 +303,11 @@ Transition fromAlarmToOven = {
   &from_timer_to_oven
 };
 
-#define TRANSITIONS_NUM 15
+#define TRANSITIONS_NUM 16
 Transition transitions[TRANSITIONS_NUM] = {
   fromAnyToOff,
   fromOffToOven,
+  fromOvenToOff,
   fromOvenToTimerSet,
   fromOffToTimerSet,
   fromTimerSetToOff,
@@ -366,8 +373,8 @@ void setup () {
   resetPreviousVariables();
 
   // Setup sample timers to read inputs and update display on a regular basis
-  timer.setInterval(250, &sampledReadInputs);
-  timer.setInterval(250, &sampledUpdateDisplay);
+  timer.setInterval(100, &sampledReadInputs);
+  timer.setInterval(200, &sampledUpdateDisplay);
 
   // Universal blinker. Used to blink something on the display.
   timer.setInterval(400, &blinkCallback);
@@ -474,7 +481,7 @@ void currentProgramLoop() {
 
   if(currentHeaterStatus != previousLoopHeaterStatus || currentProgram != previousLoopProgram) {
     // Either heater status or program changed. We have to update the outputs.
-    // To avoid surges we have to turn off all heating elements and then turn them on again after 1.5 second        
+    // To avoid surges we have to turn off all heating elements and then turn them on again after 1.5 second
     Serial.print(F("currentHeaterStatus: "));
     Serial.print(currentHeaterStatus);
     Serial.print(F("  currentProgram: "));
@@ -508,7 +515,7 @@ void setProgramOutputs() {
 
   // Finally send outputs
   sendGPIOB();
-  Serial.print(F("Setting heater outputs"));
+  //Serial.println(F("Setting heater outputs"));
 }
 
 // ########################################################
@@ -542,7 +549,7 @@ void ovenStateEnter() {
   Serial.println(F("ovenEnter"));
   display_print_P(2, 0, oven_message);
   setButtonLabel_P(0, timer_button_label);
-  setButtonLabel_P(1, empty_button_label);
+  setButtonLabel_P(1, shut_down_button_label);
 }
 
 void ovenLoop() {
